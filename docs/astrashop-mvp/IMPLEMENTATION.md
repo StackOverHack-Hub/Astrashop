@@ -22,7 +22,8 @@ Base URL comes from `VITE_API_URL`. All bodies are JSON. Shop routes need header
 | GET | `/items` | | `200 Item[]` | |
 | POST | `/reservations` | `{ id: uuid, itemId }` | `201 Reservation` new, `200 Reservation` same id retried | `400` bad input, `409` out of stock, `503` busy (retry with same id) |
 | GET | `/reservations/{id}` | | `200 Reservation` | `404` |
-| GET | `/shop/reservations` | | `200 Reservation[]` (status HELD, oldest first) | `401` |
+| GET | `/shop/reservations` | | `200 Reservation[]`: status HELD, plus EXPIRED without `returnedAt` (put back on shelf); oldest first | `401` |
+| POST | `/shop/reservations/{id}/returned` | | `200 { id, status }` (stamps `returnedAt`, no stock change, repeatable) | `401`, `404`, `409` not expired |
 | PUT | `/shop/items/{id}` | `{ stock, expectedStock }` (ints 0-100000; `expectedStock` = the stock value the shopkeeper saw) | `200 { id, stock }` | `400`, `401`, `404`, `409` stock changed since loaded: refresh and recount |
 | POST | `/shop/reservations/{id}/collect` | | `200 { id, status }` | `401`, `404`, `409` not on hold |
 | POST | `/shop/reservations/{id}/release` | | `200 { id, status }` (stock + 1) | `401`, `404`, `409` not on hold |
@@ -35,7 +36,8 @@ Any route can also return `503 { error }` when DynamoDB is busy or throttled: sa
 type Item = { id: string; name: string; course?: string; price: number; stock: number;
               confirmedAt: string; pickupWindow: string; sample?: boolean };
 type Reservation = { id: string; itemId: string; code: string;
-                     status: 'HELD' | 'COLLECTED' | 'RELEASED'; createdAt: string; collectedAt?: string };
+                     status: 'HELD' | 'COLLECTED' | 'RELEASED' | 'EXPIRED'; createdAt: string;
+                     expiresAt?: string; collectedAt?: string; endedAt?: string; returnedAt?: string };
 ```
 Error bodies are `{ error: string }`. The client generates the reservation `id` with `crypto.randomUUID()` once per attempt and reuses it on every retry.
 
@@ -142,6 +144,26 @@ Every required Round 1 item exists; no claim the code doesn't back.
 - [ ] Update PROGRESS.md; hand the team the deploy and submission checklist
 ### Success Criteria
 Merged branch builds and tests clean. Team decides on merging to `main` and pushing.
+
+## Phase 7: Production hardening
+### Objective
+Safe to leave running unattended through Demo Day and beyond.
+### Tasks
+- [x] Holds expire (`HoldMinutes`, default 24 h); a 10-minute EventBridge schedule returns expired units to stock (`EXPIRED` status)
+- [x] Shop screen lists expired holds as "put back on shelf" until the shopkeeper taps Back on shelf, so the set-aside unit isn't lost at the next recount
+- [x] Expiry run classifies failures: benign (already ended), deferred (busy, retried next run), failed (logged with ids, fails the run → alarm); holds without `expiresAt` expire from `createdAt`
+- [x] Client retries `429` with the same reservation id
+- [x] Tables: `DeletionPolicy`/`UpdateReplacePolicy: Retain`, point-in-time recovery
+- [x] API: stage throttling (burst 50, 25 rps), JSON access logs, CORS locked to `AllowedOrigin`
+- [x] Lambda: JSON logs with 30-day retention, least-privilege IAM (Get/Put/Update/Scan on the two tables), rejected shop keys logged
+- [x] Alarms: API 5xx and Lambda errors, optional SNS email (`AlertEmail`)
+- [x] Shop key minimum 16 characters
+- [x] Frontend: hold expiry shown to student and shop, review nits fixed, security headers for Amplify (`frontend/amplify-custom-headers.yml`)
+- [x] CI: backend tests, frontend build, `cfn-lint` with the SAM translator
+### Success Criteria
+Tests, build and lint pass locally and in CI; deploy verified by the team on AWS.
+
+---
 
 ## Post-Implementation
 - [ ] Demo video recorded, every link opened while signed out (team)

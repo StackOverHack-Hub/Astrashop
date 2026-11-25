@@ -87,6 +87,36 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 #### Tasks Completed
 - Merged `claude/backend` and `chatgpt/frontend` with no conflicts
 - Backend 13/13 tests, frontend type-check and build pass on the merged tree
+- Later merged to `main` and pushed to `StackOverHack-Hub/Astrashop` (25 Nov)
+
+---
+
+### Phase 7: Production hardening
+**Status:** Completed on `hardening/production` (deploy not verified: no AWS credentials here)
+
+#### ChatGPT audit (`docs/reviews/hardening-review.md`) and what was done
+| Finding | Verdict | Action |
+|---|---|---|
+| Expired unit's return notice vanishes after 24 h / no record of acting on it | Fixed | Listed until the shopkeeper taps Back on shelf (`POST .../returned`, stamps `returnedAt`). Stock stays restored at expiry: a recount made before the unit goes back undercounts, and the next recount fixes it. Restocking only on acknowledgement would double count if the shopkeeper recounts first and acknowledges later. |
+| Pre-upgrade holds without `expiresAt` never expire | Fixed | Deadline falls back to `createdAt + HoldMinutes`; test |
+| Collect allowed between deadline and next sweep | Accepted | ≤10-minute grace for late students, no double-sell possible (collect and expiry are both HELD-guarded); documented |
+| Sweep swallows non-benign cancellations | Fixed | Benign / deferred / failed classification; failures logged with ids and fail the run → `FunctionErrorsAlarm`; test with `ValidationError` |
+| Unbounded scans in sweep and shop list | Accepted | Pilot scale (one shop); shortcut comments name the GSI upgrade |
+| Reserve + expiry ABA passes the numeric recount guard | Accepted | Under "expiry restocks" semantics the net-zero case leaves stock equal to sellable units; version counter if more write paths appear |
+| Throttled (429) retry drops the reservation id | Fixed | 429 retried with backoff and keeps the pending id |
+| Redeploy restores wildcard CORS from samconfig | Fixed | Lock-down uses `--save-params`; preflight check from a foreign origin documented |
+| Amplify headers need a redeploy | Fixed | Re-upload step plus `curl -sI` check |
+| Retained/restored tables need a recovery procedure | Fixed | Restore runbook in README |
+| Throttling and cost wording too strong | Fixed | "Targets", PITR/log storage cost, Budget alert |
+| (Claude) `AllowedOrigin` typo like a trailing slash silently breaks CORS | Fixed | `AllowedPattern` on the parameter |
+
+#### Decisions Made
+- Hold expiry by schedule, not DynamoDB TTL: TTL deletes rows without returning stock and runs up to 48 h late.
+- No Lambda reserved concurrency: new accounts often have a concurrency quota of 10, which makes any reservation fail to deploy. API stage throttling caps traffic instead.
+- No per-route throttles: SAM route settings can race route creation on first deploy; one stage-wide limit is enough at pilot scale.
+- No WAF: HTTP APIs can't attach it; documented as the upgrade path with Cognito for shop logins.
+- Expired holds stay on the shop list for 24 h (found in final review): without it the set-aside unit stays in the pile while the database counts it as shelf stock, and the next recount silently drops it.
+- Alarm on API 5xx, not only Lambda Errors: the handler turns caught failures into 500/503 responses, which Lambda doesn't count as errors.
 
 ---
 
