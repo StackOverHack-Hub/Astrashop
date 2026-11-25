@@ -4,15 +4,15 @@
 A student finds an item at one campus shop, reserves the exact unit, and picks it up within a stated window. React + TypeScript + Vite on Amplify Hosting; API Gateway HTTP API + one Node.js Lambda (SAM); DynamoDB with a transactional reserve. See [RESEARCH.md](RESEARCH.md) for why.
 
 ## Who does what
-Two agents build in parallel and audit each other. Nobody edits a folder they don't own.
+Two developers build in parallel and audit each other. Nobody edits a folder they don't own.
 
 | Owner | Branch | Working copy | Owns |
 |---|---|---|---|
-| Claude Code | `claude/backend` | repo root | `backend/`, `README.md`, `docs/astrashop-mvp/`, `docs/reviews/frontend-review.md` |
-| ChatGPT | `chatgpt/frontend` | `.worktrees/chatgpt` | `frontend/`, `docs/submission/`, `docs/pilot/`, `docs/reviews/backend-review.md` |
+| Backend dev | `backend` | repo root | `backend/`, `README.md`, `docs/astrashop-mvp/`, `docs/reviews/frontend-review.md` |
+| Frontend dev | `frontend` | `.worktrees/frontend` | `frontend/`, `docs/submission/`, `docs/pilot/`, `docs/reviews/backend-review.md` |
 | Team (humans) | none | none | Interviews, pilot shop, AWS account and deploy, demo video, final submission |
 
-Both branches start from `build/astrashop-mvp`. Claude merges both back into it in Phase 6. Nothing is pushed or merged to `main` without the team's OK.
+Both branches start from `build/astrashop-mvp`. The backend dev merges both back into it in Phase 6. Nothing is pushed or merged to `main` without the team's OK.
 
 ## API contract (frozen for Phase 2)
 Base URL comes from `VITE_API_URL`. All bodies are JSON. Shop routes need header `x-shop-key`.
@@ -30,7 +30,7 @@ Base URL comes from `VITE_API_URL`. All bodies are JSON. Shop routes need header
 
 Any route can also return `503 { error }` when DynamoDB is busy or throttled: safe to retry the same request. Reservation path ids must be UUIDs (otherwise `404`); item ids are at most 128 characters.
 
-> Contract change, 25 Nov (from ChatGPT's backend review): `PUT /shop/items/{id}` now requires `expectedStock`, so a recount made before a reservation landed can't hand out a set-aside unit.
+> Contract change, 25 Nov (from the backend review): `PUT /shop/items/{id}` now requires `expectedStock`, so a recount made before a reservation landed can't hand out a set-aside unit.
 
 ```ts
 type Item = { id: string; name: string; course?: string; price: number; stock: number;
@@ -44,13 +44,13 @@ Error bodies are `{ error: string }`. The client generates the reservation `id` 
 ## Phase Summary
 | # | Phase | Owner | Reviewer | Target |
 |---|---|---|---|---|
-| 0 | Validate the problem | Team | ChatGPT drafts scripts | 26 Nov |
-| 1 | Backend API and data | Claude | ChatGPT audits diff | 25 Nov |
-| 2 | Frontend: student and shop screens | ChatGPT | Claude reviews diff | 26 Nov |
-| 3 | Deploy path and README | Claude | ChatGPT checks against brief | 26 Nov |
-| 4 | Pilot kit and measurement | ChatGPT | Claude | 27 Nov |
-| 5 | Submission documents | ChatGPT | Claude checks claims against code | 29 Nov |
-| 6 | Integrate, verify, freeze | Claude | Team | 29 Nov |
+| 0 | Validate the problem | Team | Frontend dev drafts scripts | 26 Nov |
+| 1 | Backend API and data | Backend dev | Frontend dev audits diff | 25 Nov |
+| 2 | Frontend: student and shop screens | Frontend dev | Backend dev reviews diff | 26 Nov |
+| 3 | Deploy path and README | Backend dev | Frontend dev checks against brief | 26 Nov |
+| 4 | Pilot kit and measurement | Frontend dev | Backend dev | 27 Nov |
+| 5 | Submission documents | Frontend dev | Backend dev checks claims against code | 29 Nov |
+| 6 | Integrate, verify, freeze | Backend dev | Team | 29 Nov |
 
 ---
 
@@ -58,7 +58,7 @@ Error bodies are `{ error: string }`. The client generates the reservation `id` 
 ### Objective
 Decide by 26 Nov whether "reserve a course item for pickup" is the right workflow.
 ### Tasks
-- [ ] ChatGPT: interview script for 5-8 students and a one-page shopkeeper pitch (`docs/pilot/`)
+- [ ] Frontend dev: interview script for 5-8 students and a one-page shopkeeper pitch (`docs/pilot/`)
 - [ ] Team: run interviews, record item, deadline, what they tried, whether they got it in time
 - [ ] Team: find one shopkeeper willing to set items aside
 - [ ] Team: register the team on techfest.org (closes 30 Nov 11:59 p.m. IST, gives the Team ID)
@@ -78,8 +78,8 @@ All seven routes in the contract, with no double hold on the last unit.
 - [x] Collect and release guarded on `status = HELD`
 - [x] Seed script with 12 items marked `sample: true`
 - [x] `node:test` suite with an in-memory DynamoDB fake (8 tests)
-- [ ] ChatGPT audit: `docs/reviews/backend-review.md` on its branch
-- [ ] Claude fixes confirmed findings
+- [ ] Frontend dev audit: `docs/reviews/backend-review.md` on its branch
+- [ ] Backend dev fixes confirmed findings
 ### Success Criteria
 `cd backend && npm test` passes; the audit has no open correctness findings.
 ### Files
@@ -99,7 +99,7 @@ A phone-friendly page that drives the whole flow against the contract above.
 - [ ] Shop: per-item stock input with "Confirm stock" (PUT); label it "units on shelf, not counting set-aside items"
 - [ ] `npm run build` passes (`tsc --noEmit && vite build`)
 ### Success Criteria
-Build passes; Claude's review in `docs/reviews/frontend-review.md` has no open correctness findings.
+Build passes; The backend dev's review in `docs/reviews/frontend-review.md` has no open correctness findings.
 ### Files
 `frontend/**`
 
@@ -113,13 +113,13 @@ Anyone on the team can deploy from a clean Mac in under 15 minutes.
 - [ ] Exact deploy commands: install AWS CLI + SAM, `sam deploy --guided`, seed, build frontend with `VITE_API_URL`, Amplify manual deploy of `frontend/dist`
 - [ ] Billing check and teardown (`sam delete`) notes
 ### Success Criteria
-Team follows README and gets a live HTTPS URL. (Claude cannot verify this: no AWS credentials on this machine.)
+Team follows README and gets a live HTTPS URL. (Not verifiable from the dev machine: it has no AWS credentials.)
 
 ---
 
 ## Phase 4: Pilot kit and measurement
 ### Tasks
-- [ ] ChatGPT: `docs/pilot/measurement.md`: baseline (call/message/visit) vs Astrashop: time to reliable confirmation, items secured before deadline, participants
+- [ ] Frontend dev: `docs/pilot/measurement.md`: baseline (call/message/visit) vs Astrashop: time to reliable confirmation, items secured before deadline, participants
 - [ ] Team: run the pilot on 28 Nov, fill in the sheet
 ### Success Criteria
 Real numbers, with sample stock labelled as a usability test if no shop joined.
@@ -128,10 +128,10 @@ Real numbers, with sample stock labelled as a usability test if no shop joined.
 
 ## Phase 5: Submission documents
 ### Tasks
-- [ ] ChatGPT: `docs/submission/idea-brief.md` in the format the brief requires
-- [ ] ChatGPT: `docs/submission/aws-build-summary.md` (services, why each, the transaction, cost)
-- [ ] ChatGPT: `docs/submission/demo-script.md` under 3 minutes: one student, one course requirement, one pickup, measured result
-- [ ] Claude: check every technical claim against the code
+- [ ] Frontend dev: `docs/submission/idea-brief.md` in the format the brief requires
+- [ ] Frontend dev: `docs/submission/aws-build-summary.md` (services, why each, the transaction, cost)
+- [ ] Frontend dev: `docs/submission/demo-script.md` under 3 minutes: one student, one course requirement, one pickup, measured result
+- [ ] Backend dev: check every technical claim against the code
 ### Success Criteria
 Every required Round 1 item exists; no claim the code doesn't back.
 
@@ -139,7 +139,7 @@ Every required Round 1 item exists; no claim the code doesn't back.
 
 ## Phase 6: Integrate, verify, freeze
 ### Tasks
-- [ ] Merge `claude/backend` and `chatgpt/frontend` into `build/astrashop-mvp`
+- [ ] Merge `backend` and `frontend` into `build/astrashop-mvp`
 - [ ] `npm test` (backend) and `npm run build` (frontend) on the merged tree
 - [ ] Update PROGRESS.md; hand the team the deploy and submission checklist
 ### Success Criteria

@@ -1,6 +1,6 @@
 # Astrashop backend review
 
-Reviewed `build/astrashop-mvp...claude/backend` at `26835f5`. The following findings come from source review and AWS documentation. Deployment and a live DynamoDB run remain unverified.
+Reviewed the `backend` branch against `build/astrashop-mvp`. The following findings come from source review and AWS documentation. Deployment and a live DynamoDB run remain unverified.
 
 ## Findings
 

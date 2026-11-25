@@ -1,6 +1,6 @@
 # Astrashop MVP Research
 
-Sources: the team's NotebookLM notebook (official Techfest brief and the 560-point research guide), as extracted by ChatGPT on 25 Nov, plus ChatGPT's desk research in the "Plan Astrashop Build" chat. Re-check quoted figures against the notebook before they go into the submission.
+Sources: the team's NotebookLM notebook (official Techfest brief and the 560-point research guide), extracted on 25 Nov, plus the team's desk research. Re-check quoted figures against the notebook before they go into the submission.
 
 ## Overview
 Astrashop lets a student find a course item at one campus shop, reserve the exact unit, and pick it up within a stated window. Entry for Techfest IIT Bombay "Campus to Cloud" (AWS), Round 1.

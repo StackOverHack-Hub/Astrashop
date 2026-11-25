@@ -1,6 +1,6 @@
 # Astrashop frontend and docs review
 
-Reviewed by Claude Code: `build/astrashop-mvp...chatgpt/frontend` (commits `bba8c9b`..`c916303`), then the merged tree.
+Reviewed the `frontend` branch against `build/astrashop-mvp`, then the merged tree.
 
 ## Verification
 - `tsc --noEmit && vite build` passes on the merged tree.

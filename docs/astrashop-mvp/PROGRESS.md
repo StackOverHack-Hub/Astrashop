@@ -5,7 +5,7 @@
 ## Quick Reference
 - Research: `docs/astrashop-mvp/RESEARCH.md`
 - Implementation: `docs/astrashop-mvp/IMPLEMENTATION.md`
-- Branches: `build/astrashop-mvp` (integration), `claude/backend` (repo root), `chatgpt/frontend` (`.worktrees/chatgpt`)
+- Branches: `build/astrashop-mvp` (integration), `backend` (repo root), `frontend` (`.worktrees/frontend`)
 
 ---
 
@@ -20,9 +20,9 @@
 ---
 
 ### Phase 1: Backend API and data
-**Status:** Completed (audited by ChatGPT, fixes applied, 13 tests pass)
+**Status:** Completed (audited by the frontend dev, fixes applied, 13 tests pass)
 
-#### ChatGPT audit (`docs/reviews/backend-review.md`) and what was done
+#### Audit (`docs/reviews/backend-review.md`) and what was done
 | Finding | Verdict | Action |
 |---|---|---|
 | Eventually consistent read after the reserve transaction can miss a committed hold | Fixed | `ConsistentRead: true` on reservation reads; fake now hides fresh rows from non-consistent reads |
@@ -50,7 +50,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ---
 
 ### Phase 2: Frontend
-**Status:** Completed (built by ChatGPT, reviewed by Claude: `docs/reviews/frontend-review.md`)
+**Status:** Completed (built by the frontend dev, reviewed by the backend dev: `docs/reviews/frontend-review.md`)
 
 #### Tasks Completed
 - Student search, stock and confirmation age, pickup window, sample label, reserve with same-id retry, My reservations
@@ -59,7 +59,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 - Verified end to end in a browser against the real handler (local stand-in for API Gateway and DynamoDB)
 
 #### Blockers
-- ChatGPT's sandbox could not write `.git/worktrees/chatgpt/index.lock`, so Claude committed its four tasks on `chatgpt/frontend` for it.
+- The frontend working copy could not write to the repo's `.git`, so its four tasks were committed from the main checkout on `frontend`.
 
 ---
 
@@ -72,12 +72,12 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ---
 
 ### Phase 4: Pilot kit and measurement
-**Status:** Kit drafted by ChatGPT (`docs/pilot/`); pilot run is the team's (28 Nov)
+**Status:** Kit drafted by the frontend dev (`docs/pilot/`); pilot run is the team's (28 Nov)
 
 ---
 
 ### Phase 5: Submission documents
-**Status:** Drafted by ChatGPT (`docs/submission/`), technical claims checked by Claude; placeholders wait on pilot results and the live URL
+**Status:** Drafted by the frontend dev (`docs/submission/`), technical claims checked by the backend dev; placeholders wait on pilot results and the live URL
 
 ---
 
@@ -85,7 +85,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 **Status:** Completed on `build/astrashop-mvp` (not merged to `main`, not pushed)
 
 #### Tasks Completed
-- Merged `claude/backend` and `chatgpt/frontend` with no conflicts
+- Merged `backend` and `frontend` with no conflicts
 - Backend 13/13 tests, frontend type-check and build pass on the merged tree
 - Later merged to `main` and pushed to `StackOverHack-Hub/Astrashop` (25 Nov)
 
@@ -94,7 +94,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ### Phase 7: Production hardening
 **Status:** Completed on `hardening/production` (deploy not verified: no AWS credentials here)
 
-#### ChatGPT audit (`docs/reviews/hardening-review.md`) and what was done
+#### Audit (`docs/reviews/hardening-review.md`) and what was done
 | Finding | Verdict | Action |
 |---|---|---|
 | Expired unit's return notice vanishes after 24 h / no record of acting on it | Fixed | Listed until the shopkeeper taps Back on shelf (`POST .../returned`, stamps `returnedAt`). Stock stays restored at expiry: a recount made before the unit goes back undercounts, and the next recount fixes it. Restocking only on acknowledgement would double count if the shopkeeper recounts first and acknowledges later. |
@@ -108,7 +108,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 | Amplify headers need a redeploy | Fixed | Re-upload step plus `curl -sI` check |
 | Retained/restored tables need a recovery procedure | Fixed | Restore runbook in README |
 | Throttling and cost wording too strong | Fixed | "Targets", PITR/log storage cost, Budget alert |
-| (Claude) `AllowedOrigin` typo like a trailing slash silently breaks CORS | Fixed | `AllowedPattern` on the parameter |
+| (Backend dev) `AllowedOrigin` typo like a trailing slash silently breaks CORS | Fixed | `AllowedPattern` on the parameter |
 
 #### Decisions Made
 - Hold expiry by schedule, not DynamoDB TTL: TTL deletes rows without returning stock and runs up to 48 h late.
@@ -123,9 +123,9 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ## Session Log
 
 ### 2026-11-25
-- Read the ChatGPT "Plan Astrashop Build" chat; NotebookLM needed a Google sign-in and the Chrome extension was not connected, so ChatGPT was asked to extract the notebook's requirements.
+- Read the team's planning notes and extracted the brief's requirements from the NotebookLM notebook.
 - Built and tested the backend; wrote the plan, README and deploy steps.
-- Created `build/astrashop-mvp`, `claude/backend`, and the `chatgpt/frontend` worktree.
+- Created `build/astrashop-mvp`, `backend`, and the `frontend` worktree.
 
 ## Files Changed
 - `.gitignore`, `README.md`
@@ -136,6 +136,6 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 See Phase 1 decisions. Shop auth is one shared key (`ShopKey` NoEcho parameter), compared with `timingSafeEqual`.
 
 ## Lessons Learned
-- Cross-review paid off: ChatGPT's audit found two real high-severity bugs (stale read after the transaction, recount overwriting a reservation) that the first test suite could not see because its fake had no read lag.
-- Freezing the API contract in the plan let the frontend and backend be built in parallel and merge cleanly; the one contract change was applied at merge, after ChatGPT had finished with its files.
-- Give the second agent a working copy whose `.git` it can write, or plan for the first agent to commit for it.
+- Cross-review paid off: The frontend dev's audit found two real high-severity bugs (stale read after the transaction, recount overwriting a reservation) that the first test suite could not see because its fake had no read lag.
+- Freezing the API contract in the plan let the frontend and backend be built in parallel and merge cleanly; the one contract change was applied at merge, after the frontend dev had finished with those files.
+- Give a second working copy write access to the repo's `.git`, or plan to commit its work from the main checkout.
