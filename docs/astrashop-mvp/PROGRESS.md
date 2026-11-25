@@ -1,6 +1,6 @@
 # Astrashop MVP Progress
 
-## Status: Phase 1 done, awaiting ChatGPT audit. Phase 2 handed to ChatGPT. Phase 3 README written.
+## Status: Phases 1, 2, 6 done; 3 written (deploy unverified); 0, 4, 5 drafted and waiting on the team's pilot.
 
 ## Quick Reference
 - Research: `docs/astrashop-mvp/RESEARCH.md`
@@ -50,7 +50,16 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ---
 
 ### Phase 2: Frontend
-**Status:** Handed to ChatGPT
+**Status:** Completed (built by ChatGPT, reviewed by Claude: `docs/reviews/frontend-review.md`)
+
+#### Tasks Completed
+- Student search, stock and confirmation age, pickup window, sample label, reserve with same-id retry, My reservations
+- Shop counter at `#shop`: key, held list, Collected / Release, shelf stock recount
+- Review fix at merge: recount sends `expectedStock`; 409 clears the draft and refreshes
+- Verified end to end in a browser against the real handler (local stand-in for API Gateway and DynamoDB)
+
+#### Blockers
+- ChatGPT's sandbox could not write `.git/worktrees/chatgpt/index.lock`, so Claude committed its four tasks on `chatgpt/frontend` for it.
 
 ---
 
@@ -63,17 +72,21 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 ---
 
 ### Phase 4: Pilot kit and measurement
-**Status:** Not Started (ChatGPT, then team)
+**Status:** Kit drafted by ChatGPT (`docs/pilot/`); pilot run is the team's (28 Nov)
 
 ---
 
 ### Phase 5: Submission documents
-**Status:** Not Started (ChatGPT, Claude reviews)
+**Status:** Drafted by ChatGPT (`docs/submission/`), technical claims checked by Claude; placeholders wait on pilot results and the live URL
 
 ---
 
 ### Phase 6: Integrate, verify, freeze
-**Status:** Not Started (Claude)
+**Status:** Completed on `build/astrashop-mvp` (not merged to `main`, not pushed)
+
+#### Tasks Completed
+- Merged `claude/backend` and `chatgpt/frontend` with no conflicts
+- Backend 13/13 tests, frontend type-check and build pass on the merged tree
 
 ---
 
@@ -93,4 +106,6 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 See Phase 1 decisions. Shop auth is one shared key (`ShopKey` NoEcho parameter), compared with `timingSafeEqual`.
 
 ## Lessons Learned
-(after the merge)
+- Cross-review paid off: ChatGPT's audit found two real high-severity bugs (stale read after the transaction, recount overwriting a reservation) that the first test suite could not see because its fake had no read lag.
+- Freezing the API contract in the plan let the frontend and backend be built in parallel and merge cleanly; the one contract change was applied at merge, after ChatGPT had finished with its files.
+- Give the second agent a working copy whose `.git` it can write, or plan for the first agent to commit for it.

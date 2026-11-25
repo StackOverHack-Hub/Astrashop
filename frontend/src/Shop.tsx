@@ -34,6 +34,8 @@ export function Shop({ catalog }: { catalog: Catalog }) {
   const [notice, setNotice] = useState('');
   const inFlight = useRef(false);
   const closedIds = useRef(new Set<string>());
+  // Stock shown when the shopkeeper started typing a recount, sent back as expectedStock.
+  const draftBase = useRef<Record<string, number>>({});
 
   function signOut() {
     storeShopKey('');
@@ -42,6 +44,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
     setUnlocked(false);
     setHeld([]);
     setDrafts({});
+    draftBase.current = {};
     setNotice('');
     setError('');
   }
@@ -124,10 +127,23 @@ export function Shop({ catalog }: { catalog: Catalog }) {
       setError('Enter a whole number of units, zero or more.');
       return;
     }
-    await write(item.id, async () => {
-      await confirmStock(item.id, stock, key);
-      await catalog.refresh();
+    const clearDraft = () => {
+      delete draftBase.current[item.id];
       setDrafts(({ [item.id]: _confirmed, ...remaining }) => remaining);
+    };
+    await write(item.id, async () => {
+      try {
+        await confirmStock(item.id, stock, draftBase.current[item.id] ?? item.stock, key);
+      } catch (error) {
+        // A reservation or release landed since the count started: show the new number and recount.
+        if (error instanceof ApiError && error.status === 409) {
+          clearDraft();
+          await catalog.refresh();
+        }
+        throw error;
+      }
+      await catalog.refresh();
+      clearDraft();
       setNotice(`Stock confirmed for ${item.name}.`);
     });
   }
@@ -189,6 +205,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
                     <input id={`stock-${item.id}`} type="number" inputMode="numeric" min="0" step="1" required disabled={!!saving}
                       value={drafts[item.id] ?? item.stock} onChange={(event) => {
                         const value = event.target.value;
+                        draftBase.current[item.id] ??= item.stock;
                         setDrafts((current) => ({ ...current, [item.id]: value }));
                       }} />
                     <button disabled={loading || !!saving}>{saving === item.id ? 'Confirming…' : 'Confirm stock'}</button>

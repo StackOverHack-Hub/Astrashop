@@ -82,9 +82,10 @@ export async function reserveItem(id: string, itemId: string) {
   }
 }
 
-export const confirmStock = (id: string, stock: number, shopKey: string) =>
+// expectedStock is the count the shopkeeper started from; the API rejects the recount (409) if it changed since.
+export const confirmStock = (id: string, stock: number, expectedStock: number, shopKey: string) =>
   request<Pick<Item, 'id' | 'stock'>>(`/shop/items/${encodeURIComponent(id)}`, {
-    method: 'PUT', body: { stock }, shopKey,
+    method: 'PUT', body: { stock, expectedStock }, shopKey,
   });
 
 export const closeReservation = (id: string, action: 'collect' | 'release', shopKey: string) =>

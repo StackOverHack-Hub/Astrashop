@@ -15,7 +15,7 @@ flowchart TD
 
 1. The browser loads the static React app from Amplify Hosting. The Vite build uses `VITE_API_URL` to locate the HTTP API. `GET /items` reads the catalog, stock counts, latest confirmation times, and pickup windows.
 2. For a hold, the browser generates a reservation UUID and sends it with the item ID. Lambda issues one DynamoDB transaction. It subtracts one unit only if stock is at least one and creates a `HELD` reservation only if the ID is unused. Both writes commit together. A retry sends the same UUID, so it cannot deduct another unit through the same reservation ID.
-3. The browser checks status by reservation ID. The shop counter sends its key in `x-shop-key` to list holds, confirm a stock count, or collect or release a hold. API Gateway handles browser CORS. Lambda checks the key and allows collect and release only from `HELD`. Release returns one unit in the same transaction that closes the hold.
+3. The browser checks status by reservation ID. The shop counter sends its key in `x-shop-key` to list holds, confirm a stock count, or collect or release a hold. API Gateway handles browser CORS. Lambda checks the key and allows collect and release only from `HELD`. Release returns one unit in the same transaction that closes the hold. A stock recount carries the count the shopkeeper started from and is rejected if a reservation or release changed stock in the meantime, so a unit already set aside is never offered again. Transient DynamoDB conflicts and throttling return `503`, which the app retries with the same reservation ID.
 
 ## What each service does
 
