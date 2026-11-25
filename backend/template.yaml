@@ -2,12 +2,33 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Astrashop - find, reserve and pick up an item from one campus shop
 
+# One template per environment: deploy it as two stacks (e.g. astrashop-dev, astrashop-prod).
 Parameters:
   ShopKey:
     Type: String
     NoEcho: true
-    MinLength: 8
-    Description: Shared secret the shopkeeper types into the shop screen
+    MinLength: 16
+    Description: Shared secret the shopkeeper types into the shop screen. Generate with `openssl rand -base64 24`.
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+    # One origin, scheme + host (+ port), no path or trailing slash; otherwise CORS silently fails.
+    AllowedPattern: '^(\*|https?://[A-Za-z0-9.-]+(:[0-9]+)?)$'
+    ConstraintDescription: must be * or an origin like https://main.d1234.amplifyapp.com (no trailing slash)
+    Description: Frontend origin allowed by CORS, e.g. https://main.d1234.amplifyapp.com. Use * only until the frontend URL exists.
+  HoldMinutes:
+    Type: Number
+    Default: 1440
+    MinValue: 15
+    MaxValue: 10080
+    Description: Minutes a reservation stays set aside before it expires and the unit returns to the shelf.
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Optional email for alarm notifications (AWS sends a confirmation link first).
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
 
 Globals:
   Function:
@@ -21,37 +42,70 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       CorsConfiguration:
-        AllowOrigins: ['*']
+        AllowOrigins: [!Ref AllowedOrigin]
         AllowHeaders: [content-type, x-shop-key]
         AllowMethods: [GET, POST, PUT, OPTIONS]
+        MaxAge: 600
+      # Caps total traffic so a script can't run up the bill or drain stock in seconds.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+      AccessLogSettings:
+        DestinationArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiAccessLogs}
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","route":"$context.routeKey","status":"$context.status","latencyMs":"$context.responseLatency","time":"$context.requestTime"}'
+
+  ApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
 
   ItemsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
   ReservationsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
   ApiFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
       Handler: app.handler
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+        LogGroup: !Ref FunctionLogs
       Environment:
         Variables:
           ITEMS_TABLE: !Ref ItemsTable
           RESERVATIONS_TABLE: !Ref ReservationsTable
           SHOP_KEY: !Ref ShopKey
+          HOLD_MINUTES: !Ref HoldMinutes
+      # Only the four actions the code uses; transactions authorize as their Put/Update parts.
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref ItemsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Scan]
+              Resource: [!GetAtt ItemsTable.Arn, !GetAtt ReservationsTable.Arn]
       Events:
         ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET } }
         Reserve: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /reservations, Method: POST } }
@@ -60,9 +114,53 @@ Resources:
         ShopStock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/items/{id}', Method: PUT } }
         ShopCollect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/collect', Method: POST } }
         ShopRelease: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/release', Method: POST } }
+        ShopReturned: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/returned', Method: POST } }
+        ExpireHolds: { Type: Schedule, Properties: { Schedule: rate(10 minutes) } }
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlertEmail
+    Properties:
+      Subscription: [{ Protocol: email, Endpoint: !Ref AlertEmail }]
+
+  # The handler turns caught errors into 500/503 responses, so watch the API's 5xx count.
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Astrashop API returned 5 or more server errors in 5 minutes
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - { Name: ApiId, Value: !Ref Api }
+        - { Name: Stage, Value: '$default' }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
+
+  # Crashes and timeouts, including the scheduled hold expiry.
+  FunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Astrashop Lambda crashed or timed out
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ApiFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
 
 Outputs:
   ApiUrl:
     Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com
   ItemsTableName:
     Value: !Ref ItemsTable
+  ReservationsTableName:
+    Value: !Ref ReservationsTable
