@@ -83,6 +83,8 @@ aws configure
 cd backend && sam deploy --guided
 ```
 
+SAM asks "ApiFunction may not have authorization defined, Is this okay?" once per route. Answer `y` each time: the default is No and aborts the deploy. The shop routes are protected by the shop key inside the Lambda. Don't run `sam build` first: `src/` has no `package.json`, and plain `sam deploy` uploads it as is (the Lambda runtime already includes the AWS SDK).
+
 The output prints `ApiUrl` and `ItemsTableName`.
 
 4. Load the sample catalog (every item is marked as sample data; re-running skips items that already exist):
