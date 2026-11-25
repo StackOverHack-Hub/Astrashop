@@ -1,7 +1,8 @@
 // Usage: node seed.mjs <ItemsTableName>   (uses your AWS CLI credentials and region)
 // Every item is marked sample: true so the demo shows it is not a real shop's stock.
+// Items that already exist are skipped, so re-running never resets live stock or holds.
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 const table = process.argv[2];
 if (!table) {
@@ -32,9 +33,13 @@ const items = [
 }));
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-let requests = { [table]: items.map((Item) => ({ PutRequest: { Item } })) };
-while (Object.keys(requests).length) {
-  const { UnprocessedItems = {} } = await db.send(new BatchWriteCommand({ RequestItems: requests }));
-  requests = UnprocessedItems;
+let added = 0;
+for (const Item of items) {
+  try {
+    await db.send(new PutCommand({ TableName: table, Item, ConditionExpression: 'attribute_not_exists(id)' }));
+    added += 1;
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+  }
 }
-console.log(`Seeded ${items.length} sample items into ${table}`);
+console.log(`Added ${added} sample items to ${table}, skipped ${items.length - added} that already exist`);

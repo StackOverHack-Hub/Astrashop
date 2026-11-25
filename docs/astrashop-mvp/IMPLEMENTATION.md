@@ -23,9 +23,13 @@ Base URL comes from `VITE_API_URL`. All bodies are JSON. Shop routes need header
 | POST | `/reservations` | `{ id: uuid, itemId }` | `201 Reservation` new, `200 Reservation` same id retried | `400` bad input, `409` out of stock, `503` busy (retry with same id) |
 | GET | `/reservations/{id}` | | `200 Reservation` | `404` |
 | GET | `/shop/reservations` | | `200 Reservation[]` (status HELD, oldest first) | `401` |
-| PUT | `/shop/items/{id}` | `{ stock: int >= 0 }` | `200 { id, stock }` | `400`, `401`, `404` |
-| POST | `/shop/reservations/{id}/collect` | | `200 { id, status }` | `401`, `409` not on hold |
+| PUT | `/shop/items/{id}` | `{ stock, expectedStock }` (ints 0-100000; `expectedStock` = the stock value the shopkeeper saw) | `200 { id, stock }` | `400`, `401`, `404`, `409` stock changed since loaded: refresh and recount |
+| POST | `/shop/reservations/{id}/collect` | | `200 { id, status }` | `401`, `404`, `409` not on hold |
 | POST | `/shop/reservations/{id}/release` | | `200 { id, status }` (stock + 1) | `401`, `404`, `409` not on hold |
+
+Any route can also return `503 { error }` when DynamoDB is busy or throttled: safe to retry the same request. Reservation path ids must be UUIDs (otherwise `404`); item ids are at most 128 characters.
+
+> Contract change, 25 Nov (from ChatGPT's backend review): `PUT /shop/items/{id}` now requires `expectedStock`, so a recount made before a reservation landed can't hand out a set-aside unit.
 
 ```ts
 type Item = { id: string; name: string; course?: string; price: number; stock: number;

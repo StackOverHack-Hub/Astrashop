@@ -37,6 +37,8 @@ The phone generates the reservation `id` once and resends the same `id` on retry
 
 Collect and release only work on a reservation that is still `HELD`, so pressing Release twice can't put a unit back on the shelf twice.
 
+When the shopkeeper recounts the shelf, the app sends the stock number they were looking at. If a student reserved a unit in the meantime, the recount is rejected and the shopkeeper is asked to refresh, so a unit that's already set aside can't be sold twice.
+
 ## API
 
 Shop routes need the header `x-shop-key`. Full contract: [IMPLEMENTATION.md](docs/astrashop-mvp/IMPLEMENTATION.md#api-contract-frozen-for-phase-2).
@@ -47,7 +49,7 @@ Shop routes need the header `x-shop-key`. Full contract: [IMPLEMENTATION.md](doc
 | POST | `/reservations` | Reserve one unit `{ id, itemId }` |
 | GET | `/reservations/{id}` | Reservation status and pickup code |
 | GET | `/shop/reservations` | Held reservations, oldest first |
-| PUT | `/shop/items/{id}` | Set shelf stock `{ stock }`, stamps `confirmedAt` |
+| PUT | `/shop/items/{id}` | Set shelf stock `{ stock, expectedStock }`, stamps `confirmedAt`; `409` if stock changed since the shopkeeper loaded it |
 | POST | `/shop/reservations/{id}/collect` | Mark collected |
 | POST | `/shop/reservations/{id}/release` | Release, stock goes back up by one |
 
@@ -57,7 +59,7 @@ Shop routes need the header `x-shop-key`. Full contract: [IMPLEMENTATION.md](doc
 cd backend && npm install && npm test
 ```
 
-The tests run the real handler against an in-memory stand-in for DynamoDB. They cover the last-unit race, retries, out of stock, the shop key, double release, and collect-then-release.
+The tests run the real handler against an in-memory stand-in for DynamoDB that also mimics stale reads, paged scans and throttling. They cover the last-unit race, retries, out of stock, the shop key, double release, collect-then-release, stale recounts, busy/throttled responses, and input limits.
 
 ## Deploy to AWS
 
@@ -83,7 +85,7 @@ cd backend && sam deploy --guided
 
 The output prints `ApiUrl` and `ItemsTableName`.
 
-4. Load the sample catalog (every item is marked as sample data):
+4. Load the sample catalog (every item is marked as sample data; re-running skips items that already exist):
 
 ```bash
 cd backend && node seed.mjs <ItemsTableName>

@@ -20,7 +20,21 @@
 ---
 
 ### Phase 1: Backend API and data
-**Status:** Built, awaiting audit
+**Status:** Completed (audited by ChatGPT, fixes applied, 13 tests pass)
+
+#### ChatGPT audit (`docs/reviews/backend-review.md`) and what was done
+| Finding | Verdict | Action |
+|---|---|---|
+| Eventually consistent read after the reserve transaction can miss a committed hold | Fixed | `ConsistentRead: true` on reservation reads; fake now hides fresh rows from non-consistent reads |
+| Stock recount can overwrite a concurrent reservation | Fixed | `PUT` requires `expectedStock`, conditioned `stock = :expected`, `409` if stale (contract change) |
+| Throttle/conflict reported as sold out or not on hold | Fixed | Classify by cancellation reason; `503` for transient errors on every route; unexpected errors logged |
+| Oversized keys, non-UUID paths, unsafe integers reach DynamoDB | Fixed | Item id ≤ 128 chars, UUID path check, `Number.isSafeInteger`, stock ≤ 100000 |
+| Scan pages hide held reservations | Fixed | `scanAll` follows `LastEvaluatedKey`; paged-scan test |
+| Duplicate pickup codes on the same item | Accepted | Two holds on the same item with one code are interchangeable at the counter; shortcut comment in code |
+| Seed re-run resets live stock | Fixed | Conditional puts skip existing items |
+| Runtime SDK version differs from tested SDK | Accepted | Node.js 22 runtime ships SDK v3; bundle only if a runtime update breaks something |
+
+Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount condition fails 2.
 
 #### Tasks Completed
 - SAM template, one Lambda, two on-demand DynamoDB tables
