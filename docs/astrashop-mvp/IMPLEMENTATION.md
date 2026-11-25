@@ -55,7 +55,8 @@ Decide by 26 Nov whether "reserve a course item for pickup" is the right workflo
 - [ ] ChatGPT: interview script for 5-8 students and a one-page shopkeeper pitch (`docs/pilot/`)
 - [ ] Team: run interviews, record item, deadline, what they tried, whether they got it in time
 - [ ] Team: find one shopkeeper willing to set items aside
-- [ ] Team: register the team; AWS Builder Center student verification (due 27 Nov)
+- [ ] Team: register the team on techfest.org (closes 30 Nov 11:59 p.m. IST, gives the Team ID)
+- [ ] Team: AWS Builder Center signup + SheerID student verification (recommended by 27 Nov); note the alias for the submission form
 ### Success Criteria
 At least three recent incidents and one willing shopkeeper. Otherwise pick the workflow the interviews point to before Phase 2 ships.
 
@@ -140,7 +141,8 @@ Merged branch builds and tests clean. Team decides on merging to `main` and push
 
 ## Post-Implementation
 - [ ] Demo video recorded, every link opened while signed out (team)
-- [ ] Drive folder submitted by 30 Nov 6 p.m. IST (team leader)
+- [ ] Drive folder submitted by 30 Nov 6 p.m. IST (team leader), hard close 11:59 p.m.
+- [ ] Keep the stack live through Demo Day, 17 Dec (3 min live demo + 2 min Q&A)
 
 ## Notes
 - Out of scope: payments, delivery, chat, multi-campus, automatic hold expiry (shopkeeper releases stale holds).
