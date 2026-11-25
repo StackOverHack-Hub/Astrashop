@@ -6,3 +6,5 @@ samconfig.toml
 .env*
 # ChatGPT's isolated working copy lives here
 .worktrees/
+# Claude Code preview config for local runs
+.claude/launch.json
