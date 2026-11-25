@@ -13,9 +13,11 @@ export type Reservation = {
   id: string;
   itemId: string;
   code: string;
-  status: 'HELD' | 'COLLECTED' | 'RELEASED';
+  status: 'HELD' | 'COLLECTED' | 'RELEASED' | 'EXPIRED';
   createdAt: string;
+  expiresAt?: string;
   collectedAt?: string;
+  endedAt?: string;
 };
 
 export class ApiError extends Error {
@@ -26,7 +28,9 @@ export class ApiError extends Error {
 
 class NetworkError extends Error {}
 
-const baseUrl = import.meta.env.VITE_API_URL?.trim().replace(/\/+$/, '');
+// In `npm run dev` the API defaults to the local server (backend: npm run local).
+const baseUrl = (import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:8787' : ''))
+  .trim().replace(/\/+$/, '');
 
 async function request<T>(path: string, { method = 'GET', body, shopKey }: {
   method?: 'GET' | 'POST' | 'PUT';
@@ -75,7 +79,8 @@ export async function reserveItem(id: string, itemId: string) {
     try {
       return await request<Reservation>('/reservations', { method: 'POST', body });
     } catch (error) {
-      const retryable = error instanceof NetworkError || (error instanceof ApiError && error.status >= 500);
+      // 429 = API Gateway throttling: the same id may already hold a unit, so retry rather than give up.
+      const retryable = error instanceof NetworkError || (error instanceof ApiError && (error.status >= 500 || error.status === 429));
       if (!retryable || retry === backoff.length) throw error;
       await new Promise((resolve) => setTimeout(resolve, backoff[retry]));
     }
@@ -88,7 +93,7 @@ export const confirmStock = (id: string, stock: number, expectedStock: number, s
     method: 'PUT', body: { stock, expectedStock }, shopKey,
   });
 
-export const closeReservation = (id: string, action: 'collect' | 'release', shopKey: string) =>
+export const closeReservation = (id: string, action: 'collect' | 'release' | 'returned', shopKey: string) =>
   request<Pick<Reservation, 'id' | 'status'>>(`/shop/reservations/${encodeURIComponent(id)}/${action}`, {
     method: 'POST', shopKey,
   });

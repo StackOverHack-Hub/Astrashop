@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, getReservation, reserveItem, type Item, type Reservation } from './api';
-import { age, price } from './format';
+import { age, amount, availability, groupCode, until } from './format';
 import type { Catalog } from './main';
 
 type Attempt = {
@@ -13,7 +13,7 @@ type Attempt = {
 };
 
 const storageKey = 'astrashop.reservations';
-const statusLabel = { HELD: 'Held', COLLECTED: 'Collected', RELEASED: 'Released' };
+const statusLabel = { HELD: 'Ready at the counter', COLLECTED: 'Collected', RELEASED: 'Released by the shop', EXPIRED: 'Expired' };
 
 function restoreAttempts(): Attempt[] {
   try {
@@ -31,6 +31,7 @@ function restoreAttempts(): Attempt[] {
 
 export function Student({ catalog, active }: { catalog: Catalog; active: boolean }) {
   const [query, setQuery] = useState('');
+  const [course, setCourse] = useState<string>();
   const [attempts, setAttempts] = useState(restoreAttempts);
   const saved = useRef(attempts);
   const submitting = useRef(false);
@@ -66,6 +67,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
     checking.current = true;
     setRefreshing(true);
     setRefreshError('');
+    setNotice(''); // a "held" banner from earlier may no longer be true
     const snapshot = saved.current;
     const results = await Promise.allSettled(snapshot.map(({ id }) => getReservation(id)));
     results.forEach((result, index) => {
@@ -108,11 +110,12 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       const reservation = await reserveItem(attempt.id, attempt.itemId);
       update({ ...attempt, reservation });
       setNotice(reservation.status === 'HELD'
-        ? `${item.name} is held. Pickup code ${reservation.code}.`
+        ? `${item.name} is held. Pickup code ${groupCode(reservation.code)}.`
         : `${item.name} reservation is ${statusLabel[reservation.status].toLowerCase()}.`);
       void catalog.refresh();
     } catch (error) {
-      if (error instanceof ApiError && error.status < 500) {
+      // Only a definite rejection drops the attempt; a throttled one keeps its id for "Retry reservation".
+      if (error instanceof ApiError && error.status < 500 && error.status !== 429) {
         const id = attempt.id;
         save(saved.current.filter((entry) => entry.id !== id || entry.reservation));
         setReserveError(error.status === 409 ? 'Just sold out' : error.message);
@@ -127,97 +130,129 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   }
 
   const search = query.trim().toLowerCase();
-  const visibleItems = catalog.items.filter((item) => `${item.name} ${item.course ?? ''}`.toLowerCase().includes(search));
+  const courses = [...new Set(catalog.items.map((item) => item.course).filter((c): c is string => !!c))].sort();
+  const visibleItems = catalog.items.filter((item) => (!course || item.course === course)
+    && `${item.name} ${item.course ?? ''}`.toLowerCase().includes(search));
+  const windows = new Set(catalog.items.map((item) => item.pickupWindow));
+  const sharedWindow = windows.size === 1 ? [...windows][0] : undefined;
+  const sampleStock = catalog.items.some((item) => item.sample);
 
   return (
     <>
-      <div className="screen-heading">
-        <h1>Find course supplies</h1>
-        <p>Check campus shop stock and reserve an item for pickup.</p>
+      <div className="find">
+        <h1><label htmlFor="item-search">What do you need for class?</label></h1>
+        <input id="item-search" type="search" placeholder="Lab record book, drafter, graph paper" autoComplete="off"
+          value={query} onChange={(event) => setQuery(event.target.value)} />
+        <div className="courses" role="group" aria-label="Filter by course">
+          <button type="button" aria-pressed={!course} onClick={() => setCourse(undefined)}>all</button>
+          {courses.map((name) => (
+            <button type="button" key={name} aria-pressed={course === name} onClick={() => setCourse(name)}>
+              {name.toLowerCase()}
+            </button>
+          ))}
+          <span className="count" aria-live="polite">{visibleItems.length} {visibleItems.length === 1 ? 'item' : 'items'}</span>
+        </div>
       </div>
-      {notice && <p className="notice success" role="status">{notice}</p>}
+
+      {/* The new pass is the visible confirmation; announce it without shifting the page. */}
+      <p className="visually-hidden" role="status">{notice}</p>
       {reserveError && <p className="notice error" role="alert">{reserveError}</p>}
+
       <div className="student-layout">
-        <section aria-label="Course supplies" className="catalog">
-          <div className="catalog-toolbar">
-            <div className="search-field">
-              <label htmlFor="item-search">Search items or courses</label>
-              <input id="item-search" type="search" placeholder="e.g. Lab record book" value={query} onChange={(event) => setQuery(event.target.value)} />
-            </div>
-            <button type="button" className="secondary" disabled={catalog.loading} onClick={() => void catalog.refresh()}>Refresh stock</button>
+        <section className="sheet" aria-label="Campus shop items">
+          <div className="sheet-head">
+            <p className="sheet-title">Campus stationery shop{sharedWindow && <span className="hours">, open {sharedWindow}</span>}</p>
+            {sampleStock && <span className="sample-flag">Sample stock</span>}
+            <button type="button" className="text-button" disabled={catalog.loading} onClick={() => void catalog.refresh()}>
+              {catalog.loading ? 'Refreshing…' : 'Refresh stock'}
+            </button>
           </div>
           {catalog.error && <p className="notice error" role="alert">{catalog.error}</p>}
-          {catalog.loading && catalog.items.length === 0 && <p role="status">Loading supplies…</p>}
-          {!catalog.loading && !catalog.error && visibleItems.length === 0 && (
-            <p className="empty">{search ? 'No supplies match your search.' : 'The shop has no listed supplies yet.'}</p>
+          {catalog.loading && catalog.items.length === 0 && (
+            <ul className="entries" aria-busy="true" aria-label="Loading items">
+              {[0, 1, 2, 3].map((n) => <li className="entry skeleton" key={n}><span /><span /><span /></li>)}
+            </ul>
           )}
-          <div className="item-grid">
+          {!catalog.loading && !catalog.error && visibleItems.length === 0 && (
+            <div className="empty">
+              <p>{search || course ? 'Nothing here matches.' : 'The shop hasn’t listed anything yet.'}</p>
+              {(search || course) && (
+                <button type="button" className="text-button" onClick={() => { setQuery(''); setCourse(undefined); }}>Show everything</button>
+              )}
+            </div>
+          )}
+          <ul className="entries">
             {visibleItems.map((item) => {
               const pending = attempts.some((entry) => entry.itemId === item.id && !entry.reservation);
               const held = attempts.find((entry) => entry.itemId === item.id && entry.reservation?.status === 'HELD')?.reservation;
+              const stock = availability(item.stock);
               return (
-                <article className="card item-card" key={item.id}>
-                  <div className="card-head">
-                    <div>
-                      {item.course && <p className="course">{item.course}</p>}
-                      <h2>{item.name}</h2>
-                    </div>
-                    <span className="price">{price(item.price)}</span>
+                <li className="entry" key={item.id}>
+                  {item.course && <p className="entry-course">{item.course}</p>}
+                  <h2 className="entry-name">{item.name}</h2>
+                  <p className="entry-price"><span className="rupee">₹</span>{amount(item.price)}</p>
+                  {(item.stock > 0 || pending) && (
+                    <button type="button" className="reserve" disabled={!!reserving} onClick={() => void reserve(item)}>
+                      {reserving === item.id ? 'Reserving…' : pending ? 'Retry' : held ? 'Reserve another' : 'Reserve'}
+                    </button>
+                  )}
+                  <p className={`availability ${stock.level}`}><span className="dot" aria-hidden="true" />{stock.text}</p>
+                  <p className="entry-meta">
+                    {held ? <>Held for you, code {groupCode(held.code)}</> : <>Counted <time dateTime={item.confirmedAt}>{age(item.confirmedAt)}</time></>}
+                    {!sharedWindow && <>, open {item.pickupWindow}</>}
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+
+        <aside className="passes" aria-labelledby="passes-heading">
+          <div className="passes-head">
+            <h2 id="passes-heading">Pickup passes</h2>
+            {attempts.length > 0 && (
+              <button type="button" className="text-button" disabled={refreshing} onClick={() => void refreshReservations()}>
+                {refreshing ? 'Checking…' : 'Refresh'}
+              </button>
+            )}
+          </div>
+          {refreshError && <p className="notice error" role="alert">{refreshError}</p>}
+          {attempts.length === 0 && (
+            <p className="passes-empty">Reserve something and its pickup code appears here. Show it at the counter to collect.</p>
+          )}
+          <div className="pass-stack">
+            {attempts.map((entry) => {
+              const { reservation } = entry;
+              const state = (reservation?.status ?? 'PENDING').toLowerCase();
+              return (
+                <article className={`pass pass-${state}`} key={entry.id}>
+                  <div className="pass-head">
+                    <p className="pass-status">{reservation ? statusLabel[reservation.status] : 'Not confirmed yet'}</p>
+                    {reservation ? (
+                      <p className="pass-code"><span className="visually-hidden">Pickup code </span>{groupCode(reservation.code)}</p>
+                    ) : (
+                      <button type="button" className="reserve" disabled={!!reserving} onClick={() => void reserve({
+                        id: entry.itemId, name: entry.itemName, pickupWindow: entry.pickupWindow, sample: entry.sample,
+                      })}>{reserving === entry.itemId ? 'Reserving…' : 'Retry reservation'}</button>
+                    )}
                   </div>
-                  <div className="badges">
-                    <span className={`badge ${item.stock > 0 ? 'available' : 'unavailable'}`}>
-                      {item.stock > 0 ? `${item.stock} in stock` : 'Out of stock'}
-                    </span>
-                    {item.sample && <span className="badge sample">Sample data</span>}
+                  <div className="pass-body">
+                    <h3>{entry.itemName}</h3>
+                    {reservation?.status === 'HELD' && (
+                      <dl className="pass-fields">
+                        {reservation.expiresAt && (
+                          <div><dt>Collect by</dt><dd><time dateTime={reservation.expiresAt}>{until(reservation.expiresAt)}</time></dd></div>
+                        )}
+                        <div><dt>Counter hours</dt><dd>{entry.pickupWindow}</dd></div>
+                      </dl>
+                    )}
+                    {entry.sample && <p className="pass-sample">Sample stock, not a real hold</p>}
                   </div>
-                  <dl className="item-details">
-                    <div><dt>Stock confirmed</dt><dd><time dateTime={item.confirmedAt}>{age(item.confirmedAt)}</time></dd></div>
-                    <div><dt>Pickup window</dt><dd>{item.pickupWindow}</dd></div>
-                  </dl>
-                  {held && <div className="pickup-code"><span>Pickup code</span><strong>{held.code}</strong></div>}
-                  <button type="button" disabled={!!reserving || (item.stock < 1 && !pending)} onClick={() => void reserve(item)}>
-                    {reserving === item.id ? 'Reserving…' : pending ? 'Retry reservation' : held ? 'Reserve another' : 'Reserve'}
-                  </button>
                 </article>
               );
             })}
           </div>
-        </section>
-
-        <section className="card reservations" aria-labelledby="reservations-heading">
-          <div className="section-head">
-            <h2 id="reservations-heading">My reservations</h2>
-            <button type="button" className="secondary" disabled={refreshing || attempts.length === 0} onClick={() => void refreshReservations()}>
-              {refreshing ? 'Checking…' : 'Refresh status'}
-            </button>
-          </div>
-          {refreshError && <p className="notice error" role="alert">{refreshError}</p>}
-          {attempts.length === 0 && <p className="muted">Pickup codes for items you reserve appear here.</p>}
-          {attempts.map((entry) => {
-            const { reservation } = entry;
-            return (
-              <article className="reservation" key={entry.id}>
-                <h3>{entry.itemName}</h3>
-                <div className="badges">
-                  <span className={`badge ${reservation?.status === 'HELD' ? 'available' : 'unavailable'}`}>
-                    {reservation ? statusLabel[reservation.status] : 'Confirmation pending'}
-                  </span>
-                  {entry.sample && <span className="badge sample">Sample data</span>}
-                </div>
-                {reservation ? (
-                  <>
-                    <div className="pickup-code"><span>Pickup code</span><strong>{reservation.code}</strong></div>
-                    {reservation.status === 'HELD' && <p className="muted">{entry.pickupWindow}</p>}
-                  </>
-                ) : (
-                  <button type="button" className="secondary" disabled={!!reserving} onClick={() => void reserve({
-                    id: entry.itemId, name: entry.itemName, pickupWindow: entry.pickupWindow, sample: entry.sample,
-                  })}>{reserving === entry.itemId ? 'Reserving…' : 'Retry reservation'}</button>
-                )}
-              </article>
-            );
-          })}
-        </section>
+        </aside>
       </div>
     </>
   );
