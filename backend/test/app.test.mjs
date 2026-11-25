@@ -213,3 +213,45 @@ test('oversized ids and non-uuid paths are rejected before the database', async 
   assert.equal((await call('GET /reservations/{id}', { params: { id: 'abc' } })).status, 404);
   assert.equal((await call('POST /shop/reservations/{id}/collect', { params: { id: 'abc' }, shop: true })).status, 404);
 });
+
+test('the shop confirms a hold is set aside once, then collects it', async () => {
+  const { call, advance } = setup(1);
+  const id = randomUUID();
+  const setAside = () => call('POST /shop/reservations/{id}/set-aside', { params: { id }, shop: true });
+  assert.equal((await setAside()).status, 409, 'an unknown hold is not on hold (same as collect)');
+  await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  assert.equal((await call('POST /shop/reservations/{id}/set-aside', { params: { id } })).status, 401);
+  advance(4);
+  assert.equal((await setAside()).status, 200);
+  const first = (await call('GET /reservations/{id}', { params: { id } })).body.setAsideAt;
+  assert.equal(first, '2026-11-26T10:04:00.000Z');
+  advance(3);
+  assert.equal((await setAside()).status, 200, 'pressing it again is harmless');
+  assert.equal((await call('GET /reservations/{id}', { params: { id } })).body.setAsideAt, first, 'keeps the first time');
+  assert.equal((await call('POST /shop/reservations/{id}/collect', { params: { id }, shop: true })).status, 200);
+  assert.equal((await setAside()).status, 409, 'a collected hold cannot be set aside');
+  assert.equal((await call('GET /shop/stats')).status, 401, 'stats need the shop key');
+});
+
+test('pilot numbers count outcomes and median times', async () => {
+  const { call, advance, sweep } = setup(5, { pageSize: 1 });
+  const stats = async () => (await call('GET /shop/stats', { shop: true })).body;
+  assert.equal((await stats()).medianMinutesToSetAside, null);
+  const [a, b, c, walkUp, released] = Array.from({ length: 5 }, () => randomUUID());
+  for (const id of [a, b, c, walkUp, released]) await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  advance(5);
+  await call('POST /shop/reservations/{id}/set-aside', { params: { id: a }, shop: true });
+  await call('POST /shop/reservations/{id}/release', { params: { id: released }, shop: true });
+  advance(5);
+  await call('POST /shop/reservations/{id}/set-aside', { params: { id: b }, shop: true });
+  await call('POST /shop/reservations/{id}/collect', { params: { id: walkUp }, shop: true });
+  assert.equal((await stats()).waitingToSetAside, 1);
+  advance(10);
+  await call('POST /shop/reservations/{id}/collect', { params: { id: a }, shop: true });
+  advance(60);
+  await sweep(); // b and c are past their 60-minute hold
+  assert.deepEqual(await stats(), {
+    reservations: 5, waitingToSetAside: 0, setAside: 2, collected: 2, expired: 2, released: 1,
+    medianMinutesToSetAside: 7.5, medianMinutesToCollect: 15, since: '2026-11-26T10:00:00.000Z',
+  });
+});

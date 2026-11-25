@@ -153,13 +153,55 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey, holdMi
     // Expired holds stay listed until the shopkeeper marks them returned: their unit is still in
     // the set-aside pile (however long the shop was closed) and must go back before a recount.
     'GET /shop/reservations': async () => {
-      const rows = await scanAll({ TableName: reservationsTable });
+      const rows = await scanAll({ TableName: reservationsTable, ConsistentRead: true });
       const listed = rows.filter((r) => r.status === 'HELD' || (r.status === 'EXPIRED' && !r.returnedAt));
       return json(200, listed.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
     },
 
-    // Shopkeeper confirms an expired hold's unit is back on the shelf. Stock already counts it
-    // (expiry restocked it), so this only clears the reminder; repeating it is harmless.
+    // Record when the shop first confirms the unit is physically set aside.
+    'POST /shop/reservations/{id}/set-aside': async ({ params }) => {
+      if (!UUID.test(params.id ?? '')) return json(404, { error: 'Not found' });
+      try {
+        await db.send(new UpdateCommand({
+          TableName: reservationsTable, Key: { id: params.id },
+          UpdateExpression: 'SET setAsideAt = if_not_exists(setAsideAt, :now)',
+          ConditionExpression: '#s = :held',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':now': now().toISOString(), ':held': 'HELD' },
+        }));
+        return json(200, { id: params.id, status: 'HELD' });
+      } catch (err) {
+        if (err.name === 'ConditionalCheckFailedException') return json(409, { error: 'Reservation is not on hold' });
+        throw err;
+      }
+    },
+
+    // App activity from every reservation. The pilot separately tracks the student's start and deadline.
+    'GET /shop/stats': async () => {
+      const rows = await scanAll({ TableName: reservationsTable, ConsistentRead: true });
+      const minutes = (from, to) => (Date.parse(to) - Date.parse(from)) / 60_000;
+      const median = (values) => {
+        if (values.length === 0) return null;
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = sorted.length >> 1;
+        const value = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+        return Math.round(value * 10) / 10;
+      };
+      const withStatus = (status) => rows.filter((r) => r.status === status).length;
+      return json(200, {
+        reservations: rows.length,
+        waitingToSetAside: rows.filter((r) => r.status === 'HELD' && !r.setAsideAt).length,
+        setAside: rows.filter((r) => r.setAsideAt).length,
+        collected: withStatus('COLLECTED'),
+        expired: withStatus('EXPIRED'),
+        released: withStatus('RELEASED'),
+        medianMinutesToSetAside: median(rows.filter((r) => r.setAsideAt).map((r) => minutes(r.createdAt, r.setAsideAt))),
+        medianMinutesToCollect: median(rows.filter((r) => r.collectedAt).map((r) => minutes(r.createdAt, r.collectedAt))),
+        since: rows.map((r) => r.createdAt).sort()[0] ?? null,
+      });
+    },
+
+    // Expiry already restored the stock. This only clears the physical shelf reminder.
     'POST /shop/reservations/{id}/returned': async ({ params }) => {
       if (!UUID.test(params.id ?? '')) return json(404, { error: 'Not found' });
       try {

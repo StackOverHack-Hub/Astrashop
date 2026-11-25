@@ -21,8 +21,13 @@ export function fakeDb(items, { pageSize = Infinity } = {}) {
     const row = table.get(op.Key.id) ?? { id: op.Key.id };
     const names = op.ExpressionAttributeNames ?? {};
     const values = op.ExpressionAttributeValues;
-    for (const part of op.UpdateExpression.replace(/^SET /, '').split(', ')) {
+    for (const part of op.UpdateExpression.replace(/^SET /, '').split(/, (?![^(]*\))/)) {
       const [lhs, rhs] = part.split(' = ');
+      const keep = rhs.match(/^if_not_exists\((\w+), (:\w+)\)$/);
+      if (keep) {
+        row[names[lhs] ?? lhs] = row[keep[1]] ?? values[keep[2]];
+        continue;
+      }
       const [x, sign, y] = rhs.split(' ');
       row[names[lhs] ?? lhs] = sign ? row[names[x] ?? x] + (sign === '+' ? 1 : -1) * values[y] : values[x];
     }

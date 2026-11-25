@@ -115,6 +115,8 @@ Resources:
         ShopCollect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/collect', Method: POST } }
         ShopRelease: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/release', Method: POST } }
         ShopReturned: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/returned', Method: POST } }
+        ShopSetAside: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/set-aside', Method: POST } }
+        ShopStats: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/stats, Method: GET } }
         ExpireHolds: { Type: Schedule, Properties: { Schedule: rate(10 minutes) } }
 
   AlertTopic:

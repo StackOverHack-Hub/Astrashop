@@ -23,6 +23,7 @@ const routes = [
   'GET /items', 'POST /reservations', 'GET /reservations/{id}',
   'GET /shop/reservations', 'PUT /shop/items/{id}',
   'POST /shop/reservations/{id}/collect', 'POST /shop/reservations/{id}/release', 'POST /shop/reservations/{id}/returned',
+  'POST /shop/reservations/{id}/set-aside', 'GET /shop/stats',
 ].map((routeKey) => {
   const [method, path] = routeKey.split(' ');
   return { routeKey, method, pattern: new RegExp(`^${path.replace('{id}', '([^/]+)')}$`) };
