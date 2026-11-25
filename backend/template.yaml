@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Astrashop - find, reserve and pick up an item from one campus shop
+
+Parameters:
+  ShopKey:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Shared secret the shopkeeper types into the shop screen
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: [content-type, x-shop-key]
+        AllowMethods: [GET, POST, PUT, OPTIONS]
+
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      KeySchema: [{ AttributeName: id, KeyType: HASH }]
+
+  ReservationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      KeySchema: [{ AttributeName: id, KeyType: HASH }]
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Environment:
+        Variables:
+          ITEMS_TABLE: !Ref ItemsTable
+          RESERVATIONS_TABLE: !Ref ReservationsTable
+          SHOP_KEY: !Ref ShopKey
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ItemsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+      Events:
+        ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET } }
+        Reserve: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /reservations, Method: POST } }
+        GetReservation: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/reservations/{id}', Method: GET } }
+        ShopHeld: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/reservations, Method: GET } }
+        ShopStock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/items/{id}', Method: PUT } }
+        ShopCollect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/collect', Method: POST } }
+        ShopRelease: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/release', Method: POST } }
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com
+  ItemsTableName:
+    Value: !Ref ItemsTable
