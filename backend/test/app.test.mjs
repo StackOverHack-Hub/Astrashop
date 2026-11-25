@@ -83,7 +83,12 @@ function fakeDb(items, { pageSize = Infinity } = {}) {
 const SHOP = 'test-shop-key';
 function setup(stock = 1, options) {
   const db = fakeDb([{ id: 'item-1', name: 'Mini drafter', stock }], options);
-  const handler = makeHandler(db, { itemsTable: 'items', reservationsTable: 'reservations', shopKey: SHOP });
+  let clock = Date.parse('2026-11-26T10:00:00Z');
+  const handler = makeHandler(db, {
+    itemsTable: 'items', reservationsTable: 'reservations', shopKey: SHOP, holdMinutes: 60, now: () => new Date(clock),
+  });
+  const advance = (minutes) => { clock += minutes * 60_000; };
+  const sweep = () => handler({ source: 'aws.events', 'detail-type': 'Scheduled Event' });
   const call = async (routeKey, { body, params, shop } = {}) => {
     const res = await handler({
       routeKey,
@@ -94,8 +99,82 @@ function setup(stock = 1, options) {
     return { status: res.statusCode, body: JSON.parse(res.body) };
   };
   const stockLeft = () => db.tables.items.get('item-1').stock;
-  return { call, stockLeft, db };
+  return { call, stockLeft, db, advance, sweep };
 }
+
+const counts = (expired, deferred = 0) => ({ expired, deferred, failed: 0 });
+
+test('a hold expires after the hold window and its unit returns to the shelf', async () => {
+  const { call, stockLeft, advance, sweep } = setup(1);
+  const id = randomUUID();
+  const { body } = await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  assert.equal(body.expiresAt, '2026-11-26T11:00:00.000Z');
+  advance(59);
+  assert.deepEqual(await sweep(), counts(0));
+  assert.equal(stockLeft(), 0);
+  advance(2);
+  assert.deepEqual(await sweep(), counts(1));
+  assert.equal(stockLeft(), 1);
+  assert.equal((await call('GET /reservations/{id}', { params: { id } })).body.status, 'EXPIRED');
+  assert.deepEqual(await sweep(), counts(0), 'a second sweep must not restock twice');
+  assert.equal(stockLeft(), 1);
+  assert.equal((await call('POST /shop/reservations/{id}/collect', { params: { id }, shop: true })).status, 409);
+});
+
+test('expired holds stay on the shop list until marked back on the shelf', async () => {
+  const { call, advance, sweep, stockLeft } = setup(1);
+  const id = randomUUID();
+  await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  const returned = () => call('POST /shop/reservations/{id}/returned', { params: { id }, shop: true });
+  assert.equal((await returned()).status, 409, 'a live hold cannot be marked returned');
+  advance(61);
+  await sweep();
+  advance(3 * 24 * 60); // shop closed for three days
+  const listed = (await call('GET /shop/reservations', { shop: true })).body;
+  assert.deepEqual(listed.map((r) => [r.id, r.status]), [[id, 'EXPIRED']]);
+  assert.equal((await returned()).status, 200);
+  assert.equal((await returned()).status, 200, 'repeating it is harmless');
+  assert.deepEqual((await call('GET /shop/reservations', { shop: true })).body, []);
+  assert.equal(stockLeft(), 1, 'marking returned does not restock again');
+});
+
+test('a hold made before expiry existed still expires from its createdAt', async () => {
+  const { call, advance, sweep, stockLeft, db } = setup(1);
+  const id = randomUUID();
+  await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  delete db.tables.reservations.get(id).expiresAt; // pre-upgrade row
+  advance(59);
+  assert.deepEqual(await sweep(), counts(0));
+  advance(2);
+  assert.deepEqual(await sweep(), counts(1));
+  assert.equal(stockLeft(), 1);
+});
+
+test('expiry skips collected holds and defers busy ones', async () => {
+  const { call, stockLeft, advance, sweep, db } = setup(2);
+  const collected = randomUUID();
+  const busy = randomUUID();
+  await call('POST /reservations', { body: { id: collected, itemId: 'item-1' } });
+  await call('POST /reservations', { body: { id: busy, itemId: 'item-1' } });
+  await call('POST /shop/reservations/{id}/collect', { params: { id: collected }, shop: true });
+  advance(120);
+  db.failNext = 'TransactionConflict';
+  assert.deepEqual(await sweep(), counts(0, 1));
+  assert.equal(stockLeft(), 0);
+  assert.deepEqual(await sweep(), counts(1), 'the busy hold expires on the next run');
+  assert.equal(stockLeft(), 1);
+});
+
+test('a hold that cannot expire fails the run so the alarm fires', async () => {
+  const { call, advance, sweep, db, stockLeft } = setup(1);
+  const id = randomUUID();
+  await call('POST /reservations', { body: { id, itemId: 'item-1' } });
+  advance(61);
+  db.failNext = 'ValidationError'; // e.g. the item row is missing after a partial restore
+  await assert.rejects(sweep(), /could not expire/);
+  assert.equal((await call('GET /reservations/{id}', { params: { id } })).body.status, 'HELD');
+  assert.equal(stockLeft(), 0);
+});
 
 test('two students racing for the last unit get exactly one hold', async () => {
   const { call, stockLeft } = setup(1);

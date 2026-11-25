@@ -18,8 +18,10 @@ const json = (statusCode, body) => ({
 const isItemId = (id) => typeof id === 'string' && id.length > 0 && id.length <= MAX_ID;
 const isStock = (n) => Number.isSafeInteger(n) && n >= 0 && n <= MAX_STOCK;
 const firstConditionFailed = (err) => err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed';
+// Transaction cancellation reasons that clear up on their own; anything else needs a human.
+const DEFERRABLE = new Set(['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']);
 
-export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
+export function makeHandler(db, { itemsTable, reservationsTable, shopKey, holdMinutes = 1440, now = () => new Date() }) {
   // shortcut: one shared shop key, move to Cognito if more than one shop joins
   const isShop = (headers = {}) => {
     const given = Buffer.from(headers['x-shop-key'] ?? '');
@@ -51,6 +53,54 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
       ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [`:${k}`, v])),
     },
   });
+  // Close a hold and put its unit back on the shelf in one transaction (release or expiry).
+  const endHold = (r, to) => db.send(new TransactWriteCommand({
+    TransactItems: [
+      { Update: setStatus(r.id, to, { endedAt: now().toISOString() }) },
+      { Update: {
+        TableName: itemsTable, Key: { id: r.itemId },
+        UpdateExpression: 'SET stock = stock + :one',
+        ExpressionAttributeValues: { ':one': 1 },
+      } },
+    ],
+  }));
+  const heldReservations = () => scanAll({
+    TableName: reservationsTable,
+    FilterExpression: '#s = :held',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':held': 'HELD' },
+  });
+
+  // Holds made before expiry existed have no expiresAt: give them the same window from createdAt.
+  const deadline = (r) => r.expiresAt ?? new Date(Date.parse(r.createdAt) + holdMinutes * 60_000).toISOString();
+
+  // Runs on a schedule: holds past their deadline return to stock, so nobody can hoard units.
+  // shortcut: scans every reservation; switch to a status/expiresAt GSI past a few thousand rows.
+  const expireHolds = async () => {
+    const cutoff = now().toISOString();
+    const counts = { expired: 0, deferred: 0, failed: 0 };
+    for (const r of await heldReservations()) {
+      if (deadline(r) > cutoff) continue;
+      try {
+        await endHold(r, 'EXPIRED');
+        counts.expired += 1;
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        const codes = err.CancellationReasons?.map((reason) => reason.Code) ?? [];
+        if (codes[0] === 'ConditionalCheckFailed') continue; // collected or released since the scan
+        if (codes.some((code) => DEFERRABLE.has(code))) {
+          counts.deferred += 1; // the next run, 10 minutes later, retries it
+          continue;
+        }
+        counts.failed += 1;
+        console.error(JSON.stringify({ event: 'hold_expiry_failed', reservationId: r.id, itemId: r.itemId, reasons: codes }));
+      }
+    }
+    console.info(JSON.stringify({ event: 'holds_expired', ...counts }));
+    // Fail the run so FunctionErrorsAlarm fires; the failed holds stay HELD and are retried.
+    if (counts.failed > 0) throw new Error(`${counts.failed} hold(s) could not expire; see hold_expiry_failed logs`);
+    return counts;
+  };
 
   const routes = {
     'GET /items': async () => json(200, await scanAll({ TableName: itemsTable })),
@@ -64,8 +114,11 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
       }
       // shortcut: codes are random, not unique; two holds on the same item sharing a code are
       // interchangeable at the counter. Claim codes in the transaction if holds span many shops.
+      const created = now();
       const reservation = {
-        id, itemId, code: String(randomInt(100000, 1000000)), status: 'HELD', createdAt: new Date().toISOString(),
+        id, itemId, code: String(randomInt(100000, 1000000)), status: 'HELD',
+        createdAt: created.toISOString(),
+        expiresAt: new Date(created.getTime() + holdMinutes * 60_000).toISOString(),
       };
       try {
         await db.send(new TransactWriteCommand({
@@ -97,14 +150,31 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
     },
 
     // shortcut: Scan is fine for one pilot shop, add a status GSI past a few thousand reservations
+    // Expired holds stay listed until the shopkeeper marks them returned: their unit is still in
+    // the set-aside pile (however long the shop was closed) and must go back before a recount.
     'GET /shop/reservations': async () => {
-      const held = await scanAll({
-        TableName: reservationsTable,
-        FilterExpression: '#s = :held',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':held': 'HELD' },
-      });
-      return json(200, held.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+      const rows = await scanAll({ TableName: reservationsTable });
+      const listed = rows.filter((r) => r.status === 'HELD' || (r.status === 'EXPIRED' && !r.returnedAt));
+      return json(200, listed.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+    },
+
+    // Shopkeeper confirms an expired hold's unit is back on the shelf. Stock already counts it
+    // (expiry restocked it), so this only clears the reminder; repeating it is harmless.
+    'POST /shop/reservations/{id}/returned': async ({ params }) => {
+      if (!UUID.test(params.id ?? '')) return json(404, { error: 'Not found' });
+      try {
+        await db.send(new UpdateCommand({
+          TableName: reservationsTable, Key: { id: params.id },
+          UpdateExpression: 'SET returnedAt = :now',
+          ConditionExpression: '#s = :expired',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':now': now().toISOString(), ':expired': 'EXPIRED' },
+        }));
+        return json(200, { id: params.id, status: 'EXPIRED' });
+      } catch (err) {
+        if (err.name === 'ConditionalCheckFailedException') return json(409, { error: 'Only expired holds can be marked returned' });
+        throw err;
+      }
     },
 
     // stock = units on the shelf, not counting units already set aside for a hold.
@@ -120,7 +190,7 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
           TableName: itemsTable, Key: { id: params.id },
           UpdateExpression: 'SET stock = :stock, confirmedAt = :now',
           ConditionExpression: 'stock = :expected',
-          ExpressionAttributeValues: { ':stock': body.stock, ':expected': body.expectedStock, ':now': new Date().toISOString() },
+          ExpressionAttributeValues: { ':stock': body.stock, ':expected': body.expectedStock, ':now': now().toISOString() },
           ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
         }));
         return json(200, { id: params.id, stock: body.stock });
@@ -135,7 +205,7 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
     'POST /shop/reservations/{id}/collect': async ({ params }) => {
       if (!UUID.test(params.id ?? '')) return json(404, { error: 'Not found' });
       try {
-        await db.send(new UpdateCommand(setStatus(params.id, 'COLLECTED', { collectedAt: new Date().toISOString() })));
+        await db.send(new UpdateCommand(setStatus(params.id, 'COLLECTED', { collectedAt: now().toISOString() })));
         return json(200, { id: params.id, status: 'COLLECTED' });
       } catch (err) {
         if (err.name === 'ConditionalCheckFailedException') return json(409, { error: 'Reservation is not on hold' });
@@ -148,16 +218,7 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
       const r = UUID.test(params.id ?? '') && await getReservation(params.id);
       if (!r) return json(404, { error: 'Not found' });
       try {
-        await db.send(new TransactWriteCommand({
-          TransactItems: [
-            { Update: setStatus(r.id, 'RELEASED') },
-            { Update: {
-              TableName: itemsTable, Key: { id: r.itemId },
-              UpdateExpression: 'SET stock = stock + :one',
-              ExpressionAttributeValues: { ':one': 1 },
-            } },
-          ],
-        }));
+        await endHold(r, 'RELEASED');
         return json(200, { id: r.id, status: 'RELEASED' });
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
@@ -169,9 +230,14 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey }) {
   };
 
   return async (event) => {
+    if (event.source === 'aws.events') return expireHolds();
     const route = routes[event.routeKey];
     if (!route) return json(404, { error: 'Not found' });
-    if (event.routeKey.includes(' /shop/') && !isShop(event.headers)) return json(401, { error: 'Shop key required' });
+    if (event.routeKey.includes(' /shop/') && !isShop(event.headers)) {
+      // Security event for CloudWatch; never log the key itself.
+      console.warn(JSON.stringify({ event: 'shop_key_rejected', route: event.routeKey, ip: event.requestContext?.http?.sourceIp }));
+      return json(401, { error: 'Shop key required' });
+    }
     let body;
     try {
       const raw = event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString() : event.body;
@@ -193,4 +259,5 @@ export const handler = makeHandler(DynamoDBDocumentClient.from(new DynamoDBClien
   itemsTable: process.env.ITEMS_TABLE,
   reservationsTable: process.env.RESERVATIONS_TABLE,
   shopKey: process.env.SHOP_KEY,
+  holdMinutes: Number(process.env.HOLD_MINUTES) || 1440,
 });
