@@ -55,6 +55,8 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 #### Tasks Completed
 - Student search, stock and confirmation age, pickup window, sample label, reserve with same-id retry, My reservations
 - Shop counter at `#shop`: key, held list, Collected / Release, shelf stock recount
+- Pickup passes show when the shop has set a unit aside. The counter checks pickup codes and has separate Pickups, Shelf count, and Pilot numbers sections.
+- Pilot numbers summarize reservation outcomes and elapsed time since reservations were placed. The pilot sheet captures attempt starts, deadlines, and baseline outcomes.
 - Review fix at merge: recount sends `expectedStock`; 409 clears the draft and refreshes
 - Verified end to end in a browser against the real handler (local stand-in for API Gateway and DynamoDB)
 
@@ -115,7 +117,7 @@ Mutation check: removing `ConsistentRead` fails 5 tests; removing the recount co
 - No Lambda reserved concurrency: new accounts often have a concurrency quota of 10, which makes any reservation fail to deploy. API stage throttling caps traffic instead.
 - No per-route throttles: SAM route settings can race route creation on first deploy; one stage-wide limit is enough at pilot scale.
 - No WAF: HTTP APIs can't attach it; documented as the upgrade path with Cognito for shop logins.
-- Expired holds stay on the shop list for 24 h (found in final review): without it the set-aside unit stays in the pile while the database counts it as shelf stock, and the next recount silently drops it.
+- Expired holds stay on the shop list until the shop confirms they are back on the shelf. This gives staff a reminder before the next recount.
 - Alarm on API 5xx, not only Lambda Errors: the handler turns caught failures into 500/503 responses, which Lambda doesn't count as errors.
 
 ---

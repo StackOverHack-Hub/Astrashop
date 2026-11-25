@@ -84,7 +84,12 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   }
 
   useEffect(() => {
-    if (active) void refreshReservations();
+    if (!active) return;
+    void refreshReservations();
+    // Coming back to the tab is when a student checks whether the shop has set it aside.
+    const onFocus = () => void refreshReservations();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
   }, [active]);
 
   async function reserve(item: Pick<Item, 'id' | 'name' | 'pickupWindow' | 'sample'>) {
@@ -130,6 +135,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   }
 
   const search = query.trim().toLowerCase();
+  const filtering = Boolean(search || course);
   const courses = [...new Set(catalog.items.map((item) => item.course).filter((c): c is string => !!c))].sort();
   const visibleItems = catalog.items.filter((item) => (!course || item.course === course)
     && `${item.name} ${item.course ?? ''}`.toLowerCase().includes(search));
@@ -158,10 +164,13 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       <p className="visually-hidden" role="status">{notice}</p>
       {reserveError && <p className="notice error" role="alert">{reserveError}</p>}
 
-      <div className="student-layout">
+      <div className={filtering ? 'student-layout is-filtering' : 'student-layout'}>
         <section className="sheet" aria-label="Campus shop items">
           <div className="sheet-head">
-            <p className="sheet-title">Campus stationery shop{sharedWindow && <span className="hours">, open {sharedWindow}</span>}</p>
+            <div className="sheet-title">
+              <h2>Campus stationery shop</h2>
+              {sharedWindow && <p className="hours">Open {sharedWindow}</p>}
+            </div>
             {sampleStock && <span className="sample-flag">Sample stock</span>}
             <button type="button" className="text-button" disabled={catalog.loading} onClick={() => void catalog.refresh()}>
               {catalog.loading ? 'Refreshing…' : 'Refresh stock'}
@@ -209,7 +218,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
 
         <aside className="passes" aria-labelledby="passes-heading">
           <div className="passes-head">
-            <h2 id="passes-heading">Pickup passes</h2>
+            <div>
+              <h2 id="passes-heading">Your pickup passes</h2>
+              <p className="hint">Refresh to check if your item is set aside. Show your code at the counter.</p>
+            </div>
             {attempts.length > 0 && (
               <button type="button" className="text-button" disabled={refreshing} onClick={() => void refreshReservations()}>
                 {refreshing ? 'Checking…' : 'Refresh'}
@@ -218,16 +230,20 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
           </div>
           {refreshError && <p className="notice error" role="alert">{refreshError}</p>}
           {attempts.length === 0 && (
-            <p className="passes-empty">Reserve something and its pickup code appears here. Show it at the counter to collect.</p>
+            <p className="passes-empty">Nothing reserved yet. Tap Reserve on an item and its pass appears here.</p>
           )}
           <div className="pass-stack">
             {attempts.map((entry) => {
               const { reservation } = entry;
-              const state = (reservation?.status ?? 'PENDING').toLowerCase();
+              const state = reservation?.status === 'HELD' && !reservation.setAsideAt ? 'waiting' : (reservation?.status ?? 'PENDING').toLowerCase();
               return (
                 <article className={`pass pass-${state}`} key={entry.id}>
                   <div className="pass-head">
-                    <p className="pass-status">{reservation ? statusLabel[reservation.status] : 'Not confirmed yet'}</p>
+                    <p className="pass-status">
+                      {!reservation ? 'Not confirmed yet'
+                        : reservation.status !== 'HELD' ? statusLabel[reservation.status]
+                          : reservation.setAsideAt ? 'Set aside for you' : 'Reserved, waiting for the shop'}
+                    </p>
                     {reservation ? (
                       <p className="pass-code"><span className="visually-hidden">Pickup code </span>{groupCode(reservation.code)}</p>
                     ) : (
@@ -243,7 +259,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
                         {reservation.expiresAt && (
                           <div><dt>Collect by</dt><dd><time dateTime={reservation.expiresAt}>{until(reservation.expiresAt)}</time></dd></div>
                         )}
-                        <div><dt>Counter hours</dt><dd>{entry.pickupWindow}</dd></div>
+                        {reservation.setAsideAt && (
+                          <div><dt>Set aside</dt><dd><time dateTime={reservation.setAsideAt}>{until(reservation.setAsideAt)}</time></dd></div>
+                        )}
+                        <div><dt>Hours</dt><dd>{entry.pickupWindow}</dd></div>
                       </dl>
                     )}
                     {entry.sample && <p className="pass-sample">Sample stock, not a real hold</p>}

@@ -9,6 +9,8 @@ Compare the student’s usual method with Astrashop for one campus shop and a sm
 
 For every attempt, fix the deadline in advance. Record starts, verified confirmations, and pickups using the same time zone. Mark attempts without confirmation as **unconfirmed** and keep them in the attempt count. Report the median time for confirmed attempts together with the number confirmed. For on-time pickups, use **on-time pickups divided by all attempts**, including cancellations, misses, and failures. Count people separately from attempts.
 
+Use the pickup pass’s **Set aside** time and the counter’s collection status to cross-check your notes. The counter’s **Pilot numbers** start timing at reservation and cover the app's reservation history. Use the attempt record below for catalog-open times, the baseline, and on-time pickup rates.
+
 ## Attempt record
 
 | Attempt ID | Participant alias | Method | Exact item | Deadline | Started | Reliable confirmation | Picked up | Outcome or failure reason |

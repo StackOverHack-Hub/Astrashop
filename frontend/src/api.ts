@@ -16,8 +16,21 @@ export type Reservation = {
   status: 'HELD' | 'COLLECTED' | 'RELEASED' | 'EXPIRED';
   createdAt: string;
   expiresAt?: string;
+  setAsideAt?: string;
   collectedAt?: string;
   endedAt?: string;
+};
+
+export type ShopStats = {
+  reservations: number;
+  waitingToSetAside: number;
+  setAside: number;
+  collected: number;
+  expired: number;
+  released: number;
+  medianMinutesToSetAside: number | null;
+  medianMinutesToCollect: number | null;
+  since: string | null;
 };
 
 export class ApiError extends Error {
@@ -71,6 +84,7 @@ async function request<T>(path: string, { method = 'GET', body, shopKey }: {
 export const getItems = () => request<Item[]>('/items');
 export const getReservation = (id: string) => request<Reservation>(`/reservations/${encodeURIComponent(id)}`);
 export const getShopReservations = (shopKey: string) => request<Reservation[]>('/shop/reservations', { shopKey });
+export const getShopStats = (shopKey: string) => request<ShopStats>('/shop/stats', { shopKey });
 
 export async function reserveItem(id: string, itemId: string) {
   const body = { id, itemId };
@@ -93,7 +107,9 @@ export const confirmStock = (id: string, stock: number, expectedStock: number, s
     method: 'PUT', body: { stock, expectedStock }, shopKey,
   });
 
-export const closeReservation = (id: string, action: 'collect' | 'release' | 'returned', shopKey: string) =>
+export type HoldAction = 'set-aside' | 'collect' | 'release' | 'returned';
+
+export const holdAction = (id: string, action: HoldAction, shopKey: string) =>
   request<Pick<Reservation, 'id' | 'status'>>(`/shop/reservations/${encodeURIComponent(id)}/${action}`, {
     method: 'POST', shopKey,
   });

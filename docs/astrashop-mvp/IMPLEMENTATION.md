@@ -23,6 +23,8 @@ Base URL comes from `VITE_API_URL`. All bodies are JSON. Shop routes need header
 | POST | `/reservations` | `{ id: uuid, itemId }` | `201 Reservation` new, `200 Reservation` same id retried | `400` bad input, `409` out of stock, `503` busy (retry with same id) |
 | GET | `/reservations/{id}` | | `200 Reservation` | `404` |
 | GET | `/shop/reservations` | | `200 Reservation[]`: status HELD, plus EXPIRED without `returnedAt` (put back on shelf); oldest first | `401` |
+| GET | `/shop/stats` | | `200` reservation outcome counts and median minutes from reservation to set-aside or collection (null until measured) | `401` |
+| POST | `/shop/reservations/{id}/set-aside` | | `200 { id, status }` (records the first `setAsideAt`, repeatable while held) | `401`, `404`, `409` not held |
 | POST | `/shop/reservations/{id}/returned` | | `200 { id, status }` (stamps `returnedAt`, no stock change, repeatable) | `401`, `404`, `409` not expired |
 | PUT | `/shop/items/{id}` | `{ stock, expectedStock }` (ints 0-100000; `expectedStock` = the stock value the shopkeeper saw) | `200 { id, stock }` | `400`, `401`, `404`, `409` stock changed since loaded: refresh and recount |
 | POST | `/shop/reservations/{id}/collect` | | `200 { id, status }` | `401`, `404`, `409` not on hold |
@@ -37,7 +39,7 @@ type Item = { id: string; name: string; course?: string; price: number; stock: n
               confirmedAt: string; pickupWindow: string; sample?: boolean };
 type Reservation = { id: string; itemId: string; code: string;
                      status: 'HELD' | 'COLLECTED' | 'RELEASED' | 'EXPIRED'; createdAt: string;
-                     expiresAt?: string; collectedAt?: string; endedAt?: string; returnedAt?: string };
+                     expiresAt?: string; setAsideAt?: string; collectedAt?: string; endedAt?: string; returnedAt?: string };
 ```
 Error bodies are `{ error: string }`. The client generates the reservation `id` with `crypto.randomUUID()` once per attempt and reuses it on every retry.
 
@@ -91,13 +93,14 @@ All seven routes in the contract, with no double hold on the last unit.
 ### Objective
 A phone-friendly page that drives the whole flow against the contract above.
 ### Tasks
-- [ ] Vite + React + TypeScript in `frontend/`, no UI framework, no router (use `#shop` for the shop screen)
-- [ ] Student: search 10-20 items; show price, stock, "stock confirmed X ago", pickup window; "Sample data" label when `sample`
-- [ ] Student: Reserve. Show the 6-digit pickup code. Retry network errors and 5xx up to 2 times with the same id. Show 409 as "Just sold out"
-- [ ] Student: "My reservations" kept in localStorage (wrapped in try/catch), status refreshed from `GET /reservations/{id}`
-- [ ] Shop (`#shop`): enter shop key (sessionStorage); list held reservations with code, item name, age; Collected / Release buttons
-- [ ] Shop: per-item stock input with "Confirm stock" (PUT); label it "units on shelf, not counting set-aside items"
-- [ ] `npm run build` passes (`tsc --noEmit && vite build`)
+- [x] Vite + React + TypeScript in `frontend/`, with `#shop` for the shop screen
+- [x] Student search for the sample catalog, with price, stock, confirmation age, pickup window, and a sample stock label
+- [x] Student reservations with a six-digit pickup code, two same-ID retries on network errors and 5xx, and a sold-out message on 409
+- [x] **Your pickup passes** saved in localStorage, with status refreshed from `GET /reservations/{id}`
+- [x] Shop counter with a key saved in sessionStorage, held reservations with code, item name, and age, plus **Collected** and **Release** actions
+- [x] Shelf count confirmation per item, with active reservations excluded from the count
+- [x] `npm run build` passes (`tsc --noEmit && vite build`)
+- [x] Student passes distinguish reserved from set aside. The counter confirms set-aside, looks up pickup codes, and shows pilot activity in its own section.
 ### Success Criteria
 Build passes; The backend dev's review in `docs/reviews/frontend-review.md` has no open correctness findings.
 ### Files
@@ -171,5 +174,5 @@ Tests, build and lint pass locally and in CI; deploy verified by the team on AWS
 - [ ] Keep the stack live through Demo Day, 17 Dec (3 min live demo + 2 min Q&A)
 
 ## Notes
-- Out of scope: payments, delivery, chat, multi-campus, automatic hold expiry (shopkeeper releases stale holds).
+- Out of scope: payments, delivery, chat, and multi-campus.
 - Shop auth is one shared key, fine for one pilot shop; Cognito if more shops join.

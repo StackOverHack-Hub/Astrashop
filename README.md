@@ -2,7 +2,9 @@
 
 Reserve the exact course item you need at your campus shop, and pick it up before your deadline.
 
-A student searches the shop's items, sees how many are on the shelf and when that was last confirmed, reserves one unit, and gets a 6-digit pickup code. The shopkeeper sets that unit aside, then marks it collected (the student pays in person) or releases it back to the shelf.
+A student searches the shop's items, checks availability and hours, and reserves a unit with a six-digit pickup code. The shopkeeper confirms when the unit is set aside. The student can refresh their pickup pass to check whether it’s ready. At the counter, the shopkeeper checks the code and marks the unit collected. The student pays in person.
+
+The shop counter has separate sections for pickups, shelf counts, and pilot numbers. The dashboard tracks reservation outcomes and the time from reservation to set-aside or collection. Use the [pilot measurement sheet](docs/pilot/measurement.md) to record the student’s start time, their deadline, and baseline attempts.
 
 Built for Techfest IIT Bombay "Campus to Cloud", Round 1. Plan and research: [docs/astrashop-mvp](docs/astrashop-mvp/).
 
@@ -43,7 +45,7 @@ Collect and release only work on a reservation that is still `HELD`, so pressing
 
 When the shopkeeper recounts the shelf, the app sends the stock number they were looking at. If a student reserved a unit in the meantime, the recount is rejected and the shopkeeper is asked to refresh, so a unit that's already set aside can't be sold twice.
 
-Every hold has an `expiresAt` (24 hours by default, set by `HoldMinutes`). Every 10 minutes a scheduled run marks overdue holds `EXPIRED` and puts their units back, using the same all-or-nothing write as a release. Nobody can hoard stock by reserving and never coming. Expired holds also show up in your pilot data as no-shows. The shop screen lists each expired hold under "Expired: put back on shelf" until the shopkeeper taps **Back on shelf**, even if the shop was closed for days, so the set-aside unit goes back before the next recount. A hold can still be collected in the few minutes between its deadline and the next expiry run, which gives late students a short grace period. Choose `HoldMinutes` around the shop's hours: a 24-hour hold placed at 5 p.m. on Saturday runs out on Sunday while the shop is closed.
+Every hold has an `expiresAt` (24 hours by default, set by `HoldMinutes`). Every 10 minutes a scheduled run marks overdue holds `EXPIRED` and puts their units back, using the same all-or-nothing write as a release. Expired holds count as no-shows in the dashboard. **Expired pickups** lists each hold until the shopkeeper taps **Back on shelf**, even if the shop was closed for days. The shopkeeper returns any set-aside units before confirming a recount. A hold can still be collected in the few minutes between its deadline and the next expiry run, which gives late students a short grace period. Choose `HoldMinutes` around the shop's hours. A 24-hour hold placed at 5 p.m. on Saturday runs out on Sunday while the shop is closed.
 
 ## API
 
@@ -53,9 +55,11 @@ Shop routes need the header `x-shop-key`. Full contract: [IMPLEMENTATION.md](doc
 |---|---|---|
 | GET | `/items` | List items |
 | POST | `/reservations` | Reserve one unit `{ id, itemId }` |
-| GET | `/reservations/{id}` | Reservation status (`HELD`, `COLLECTED`, `RELEASED`, `EXPIRED`), pickup code, `expiresAt` |
+| GET | `/reservations/{id}` | Reservation status (`HELD`, `COLLECTED`, `RELEASED`, `EXPIRED`), pickup code, `expiresAt`, and `setAsideAt` once confirmed |
 | GET | `/shop/reservations` | Held reservations plus expired holds not yet marked back on the shelf, oldest first |
+| GET | `/shop/stats` | Reservation counts and median times from reservation to set-aside or collection |
 | PUT | `/shop/items/{id}` | Set shelf stock `{ stock, expectedStock }`, stamps `confirmedAt`; `409` if stock changed since the shopkeeper loaded it |
+| POST | `/shop/reservations/{id}/set-aside` | Confirm the held unit is set aside and keep its first confirmation time |
 | POST | `/shop/reservations/{id}/collect` | Mark collected |
 | POST | `/shop/reservations/{id}/release` | Release, stock goes back up by one |
 | POST | `/shop/reservations/{id}/returned` | Clear an expired hold's "put back on shelf" reminder (stock was already restored at expiry) |
@@ -148,7 +152,7 @@ Check that another site is refused (this should print nothing):
 curl -si -X OPTIONS <ApiUrl>/items -H "Origin: https://example.com" -H "Access-Control-Request-Method: GET" | grep -i access-control-allow-origin
 ```
 
-8. Check it on a phone: reserve an item, then open `<your URL>/#shop`, enter the shop key, and mark it collected.
+8. Check it on a phone. Reserve an item, open `<your URL>/#shop`, enter the shop key, and select **Set aside**. Refresh the student pass to check the confirmation. Use its code at the counter and mark the pickup collected.
 
 To change the backend later, run `sam deploy` again from `backend/`. To change the frontend, rebuild and upload a new zip. For a separate test environment, deploy a second stack (for example `astrashop-dev`) with its own key.
 

@@ -66,7 +66,7 @@ time { font-variant-numeric: tabular-nums; }
 
 /* Header: wordmark and two text tabs (MUJI-style restraint). */
 .shell { width: min(100% - 2rem, 76rem); margin-inline: auto; }
-.masthead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1.5rem; min-height: 4.5rem; }
+.masthead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1.5rem; min-height: 4.5rem; border-bottom: 1px solid var(--rule); }
 .wordmark { display: inline-flex; align-items: center; gap: .55rem; color: var(--ink); font-size: 1.3rem; font-weight: 700; letter-spacing: -.04em; text-decoration: none; }
 .mark { width: 1.6rem; height: 1.6rem; }
 .navigation { display: flex; gap: 1.4rem; }
@@ -79,7 +79,9 @@ time { font-variant-numeric: tabular-nums; }
 .content { padding-block: 1.25rem 4rem; }
 
 /* Search is the opening: a question written on a line. */
-.find { margin-bottom: 1.6rem; }
+/* Sections are told apart by surface: the question on paper, the catalog on a white ruled sheet,
+   your passes on a tinted panel. */
+.find { margin-bottom: 1.75rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--rule); }
 .find h1 { font: inherit; }
 .find label { display: block; max-width: 18ch; font-size: clamp(2rem, 5.4vw, 3.3rem); font-weight: 650; line-height: 1.02; letter-spacing: -.045em; text-wrap: balance; }
 .find input {
@@ -122,8 +124,9 @@ time { font-variant-numeric: tabular-nums; }
   width: 1.5px; background: var(--margin); opacity: .65;
 }
 .sheet-head { display: flex; flex-wrap: wrap; align-items: center; column-gap: .6rem; min-height: calc(var(--line) * 2); line-height: var(--line); }
-.sheet-title { flex-basis: 100%; font-weight: 600; }
-.hours { display: none; color: var(--graphite); font-weight: 400; }
+.sheet-title { flex-basis: 100%; line-height: var(--line); }
+.sheet-title h2 { font-size: 1.05rem; font-weight: 650; letter-spacing: -.01em; }
+.hours { color: var(--graphite); font-size: .85rem; }
 .sheet-head .text-button { min-height: var(--line); margin-left: auto; padding-block: 0; }
 .sample-flag {
   padding: 0 .35rem; border: 1px solid var(--amber); border-radius: .2rem; line-height: 1.4;
@@ -163,8 +166,10 @@ time { font-variant-numeric: tabular-nums; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 /* Pickup passes: only what the counter needs, code first (Apple Wallet). */
-.passes-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 2.75rem; }
-.passes-head h2, .column-title { font-size: 1.1rem; font-weight: 650; letter-spacing: -.015em; }
+.passes { padding: 1.1rem 1.1rem 1.25rem; border: 1px solid #dde4f3; border-radius: 1rem; background: var(--blue-wash); }
+.passes-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: .9rem; }
+.passes-head .hint { margin-top: .15rem; font-size: .85rem; }
+.passes-head h2 { font-size: 1.1rem; font-weight: 650; letter-spacing: -.015em; }
 .passes-empty { max-width: 34ch; color: var(--graphite); font-size: .95rem; }
 .pass-stack { display: grid; gap: .9rem; filter: drop-shadow(0 10px 14px rgb(24 33 58 / .12)) drop-shadow(0 1px 1px rgb(24 33 58 / .08)); }
 .pass {
@@ -185,14 +190,16 @@ time { font-variant-numeric: tabular-nums; }
 .pass-fields dt { color: var(--graphite); font-size: .78rem; }
 .pass-fields dd { font-weight: 600; font-size: .92rem; text-align: right; }
 .pass-sample { margin-top: .7rem; color: var(--amber-text); font-size: .8rem; }
-.pass-pending .pass-status { color: var(--amber-text); }
+.pass:is(.pass-pending, .pass-waiting) .pass-status { color: var(--amber-text); }
+.pass-held .pass-code { color: var(--green-text); }
 .pass:is(.pass-collected, .pass-released, .pass-expired) .pass-status { color: var(--graphite); }
 .pass:is(.pass-collected, .pass-released, .pass-expired) .pass-code {
   color: var(--graphite); text-decoration: line-through 2px; font-size: 1.9rem;
 }
 
 /* Shop counter. */
-.counter-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem 1.5rem; margin-bottom: 1.25rem; }
+.counter-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: .5rem 1.5rem; margin-bottom: 1.5rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--rule); }
+.counter-head .hint { max-width: 52ch; margin-top: .35rem; }
 .counter-head h1 { font-size: clamp(1.9rem, 4.6vw, 2.7rem); font-weight: 650; line-height: 1.05; letter-spacing: -.045em; }
 .counter-actions { display: flex; gap: 1.1rem; }
 .key-form { display: grid; max-width: 26rem; padding: 1.5rem; border-radius: 1rem; background: var(--sheet); box-shadow: var(--shadow); }
@@ -200,8 +207,36 @@ time { font-variant-numeric: tabular-nums; }
 .key-form input { height: 2.9rem; margin: .9rem 0 1rem; padding: 0 .8rem; border: 1px solid var(--rule-strong); border-radius: .5rem; background: #fff; }
 .key-form .reserve { justify-self: start; }
 
-.shop-layout { display: grid; gap: 2.25rem; min-width: 0; }
-.column-title { display: flex; align-items: center; gap: .55rem; min-height: 2.75rem; }
+.shop-layout { display: grid; gap: 1.75rem; min-width: 0; }
+
+/* Raised white panel for a working section, with its own heading and one-line purpose. */
+.panel { min-width: 0; padding: 1.15rem 1.25rem 1.25rem; border-radius: 1rem; background: var(--sheet); box-shadow: var(--shadow); }
+.panel-head { margin-bottom: 1rem; }
+.panel-head h2 { display: flex; align-items: center; gap: .55rem; font-size: 1.15rem; font-weight: 650; letter-spacing: -.015em; }
+.panel-head .hint { max-width: 60ch; margin-top: .2rem; font-size: .875rem; }
+
+.code-check { display: grid; gap: .3rem; margin-bottom: 1rem; }
+.code-check label { font-size: .875rem; font-weight: 600; }
+.code-entry { display: grid; grid-template-columns: minmax(0, 13rem) auto; justify-content: start; gap: .65rem; }
+.code-check input {
+  min-width: 0;
+  height: 2.75rem; padding: 0 .8rem; border: 1px solid var(--rule-strong); border-radius: .55rem; background: #fff;
+  font-size: 1.3rem; font-weight: 700; letter-spacing: .08em; font-variant-numeric: tabular-nums;
+}
+.code-result { grid-column: 1 / -1; font-size: .9rem; font-weight: 500; }
+.code-result.match { color: var(--green-text); }
+.code-result.miss { color: #8e2c25; }
+
+.state-ready .dot, .state-waiting .dot { display: inline-block; margin-right: .4rem; vertical-align: .05em; }
+.state-waiting .dot { background: var(--amber); }
+.pickup.is-set-aside .pickup-code { color: var(--green-text); }
+
+.stats { margin-top: 1.75rem; background: var(--blue-wash); box-shadow: none; border: 1px solid #dde4f3; }
+.stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border-radius: .75rem; background: #dde4f3; }
+.stat-grid div { padding: .8rem .9rem; background: var(--sheet); }
+.stat-grid dt { color: var(--graphite); font-size: .8rem; }
+.stat-grid dd { margin-top: .15rem; font-size: 1.45rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.stat-grid dd small { color: var(--graphite); font-size: .9rem; font-weight: 500; }
 .tally { min-width: 1.6rem; padding: 0 .4rem; border-radius: .35rem; background: var(--blue-wash); color: var(--blue); font-size: .85rem; text-align: center; font-variant-numeric: tabular-nums; }
 .pickup {
   display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: 'code info' 'actions actions';
@@ -211,19 +246,25 @@ time { font-variant-numeric: tabular-nums; }
 .pickup-info { grid-area: info; min-width: 0; }
 .pickup-info h3 { font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
 .pickup-info p { color: var(--graphite); font-size: .875rem; }
-.pickup-actions { grid-area: actions; display: flex; align-items: center; gap: .9rem; }
+.pickup-actions { grid-area: actions; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .9rem; }
 
-.putback { margin-bottom: 1.75rem; padding: 1rem 1.15rem; border-left: 3px solid var(--amber); border-radius: 0 .75rem .75rem 0; background: #fff7ea; }
-.putback h2 { font-size: 1.05rem; font-weight: 650; }
+.putback { margin-bottom: 1rem; padding: 1rem 1.15rem; border-left: 3px solid var(--amber); border-radius: 0 .75rem .75rem 0; background: #fff7ea; }
+.putback h3 { font-size: 1.02rem; font-weight: 650; }
 .putback > p { max-width: 60ch; margin-top: .2rem; color: #6b4a12; font-size: .9rem; }
 .putback li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .9rem; padding-top: .55rem; }
 .putback-code { white-space: nowrap; font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.putback-item { overflow-wrap: anywhere; }
 .putback-item small { display: block; color: var(--graphite); font-size: .8rem; }
+
+@media (max-width: 30rem) {
+  .putback li { grid-template-columns: auto minmax(0, 1fr); row-gap: 0; }
+  .putback li .text-button { grid-column: 2; justify-self: start; }
+}
 
 /* Shelf count: a ledger on the same ruled sheet; each row is two lines. */
 .ledger .sheet-head { flex-direction: column; align-items: flex-start; justify-content: center; }
 .ledger .sheet-head h2 { font-size: 1.1rem; font-weight: 650; }
-.ledger .sheet-head .hint { font-size: .85rem; }
+.ledger .sheet-head .hint { font-size: .85rem; line-height: 1.45; }
 /* Phones: name on its own line, then age + input + confirm across two lines (3 lines per row). */
 .ledger-row {
   display: grid; grid-template-columns: minmax(0, 1fr) 4.5rem auto; column-gap: .75rem;
@@ -247,12 +288,11 @@ time { font-variant-numeric: tabular-nums; }
   .content { padding-top: 2rem; }
   .sheet { padding: 0 1.5rem var(--line) 3.4rem; }
   .sheet::before { left: 2.2rem; }
-  .hours { display: inline; }
   .sheet-title { flex-basis: auto; }
   .find input { font-size: 1.2rem; }
   .entries { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .pickup { grid-template-columns: max-content minmax(0, 1fr) auto; grid-template-areas: 'code info actions'; }
   .ledger-row { grid-template-columns: minmax(0, 1fr) 5rem auto; grid-template-rows: var(--line) var(--line); grid-template-areas: 'item input save' 'meta input save'; }
+  .stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 @media (min-width: 62rem) {
@@ -261,9 +301,9 @@ time { font-variant-numeric: tabular-nums; }
   .shop-layout { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
 }
 
-/* On phones, passes come first once you have one: it's what you open the app for at the counter. */
+/* On phones, keep passes near the top until the student starts looking for supplies. */
 @media (max-width: 61.99rem) {
-  .passes:has(.pass) { order: -1; }
+  .student-layout:not(.is-filtering) .passes:has(.pass) { order: -1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

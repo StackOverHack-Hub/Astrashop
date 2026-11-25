@@ -11,6 +11,16 @@ export const amount = (value: number) => number.format(value);
 // Pickup codes read and match faster at the counter in two groups of three: 448 835.
 export const groupCode = (code: string) => code.replace(/^(\d{3})(\d{3})$/, '$1 $2');
 
+// Pilot durations: "7.5 min", "2 h 5 min", or a plain note when there is nothing to measure yet.
+export function duration(minutes: number | null) {
+  if (minutes === null) return 'No data yet';
+  if (minutes < 60) return `${minutes} min`;
+  const rounded = Math.round(minutes);
+  const hours = Math.floor(rounded / 60);
+  const rest = rounded % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
 // Availability in the words a student would use, with a level for the status dot.
 export function availability(stock: number): { level: 'in' | 'low' | 'out'; text: string } {
   if (stock <= 0) return { level: 'out', text: 'Sold out' };
