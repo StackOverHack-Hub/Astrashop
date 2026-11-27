@@ -8,15 +8,50 @@ import http from 'node:http';
 import { makeHandler } from './src/app.mjs';
 import { fakeDb } from './fake-db.mjs';
 import { sampleItems } from './sample-items.mjs';
+import { makeMarketplace } from './src/marketplace.mjs';
+import { memoryMarketplace, memoryLimiter } from './marketplace-local.mjs';
 
 const port = Number(process.env.PORT) || 8787;
 const shopKey = process.env.SHOP_KEY || 'local-shop-key';
+const host = process.env.HOST || '127.0.0.1';
 const handler = makeHandler(fakeDb(sampleItems()), {
   itemsTable: 'items',
   reservationsTable: 'reservations',
   shopKey,
   holdMinutes: Number(process.env.HOLD_MINUTES) || 1440,
 });
+const profiles = new Map([
+  ['Bearer demo-asha', { id: 'asha' }],
+  ['Bearer demo-ravi', { id: 'ravi' }],
+  ['Bearer demo-neha', { id: 'neha' }],
+  ['Bearer demo-moderator', { id: 'moderator', moderator: true }],
+]);
+const store = memoryMarketplace();
+const actorFrom = (event) => profiles.get(event.headers.authorization);
+const marketplace = makeMarketplace(store, memoryLimiter(), { actorFrom });
+const seedMarketplace = makeMarketplace(store, async () => 0, { actorFrom });
+for (const [account, name, programme, about] of [
+  ['asha', 'Asha', 'Product Design', 'I share drawing supplies and help students get started in the workshop.'],
+  ['ravi', 'Ravi', 'Mechanical Engineering', 'I like fixing bikes and finding a second home for useful things.'],
+]) {
+  await seedMarketplace({
+    routeKey: 'PUT /marketplace/profile',
+    headers: { authorization: `Bearer demo-${account}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ name, programme, about }),
+  });
+}
+for (const [index, [kind, title, description, meetup, pricePaise]] of [
+  ['item', 'Mini drafter', 'Used for one drawing course. Includes the carrying sleeve.', 'Library courtyard', 24000],
+  ['service', 'Bicycle tune-up', 'I can adjust your brakes and gears after class.', 'Student activity centre', 15000],
+  ['favor', 'Help with first-year lab setup', 'I can show you how to set up the shared equipment.', 'Physics lab lobby', 0],
+].entries()) {
+  await seedMarketplace({
+    routeKey: 'POST /marketplace/listings',
+    headers: { authorization: index === 1 ? 'Bearer demo-ravi' : 'Bearer demo-asha', 'content-type': 'application/json' },
+    body: JSON.stringify({ id: `00000000-0000-4000-8000-00000000000${index}`, kind, title, description, meetup, pricePaise,
+      ...(kind === 'item' ? { condition: 'good' } : { scope: description }), availability: 'Weekdays after class' }),
+  });
+}
 
 // The same routes as template.yaml; in AWS, API Gateway does this matching and CORS.
 const routes = [
@@ -24,38 +59,70 @@ const routes = [
   'GET /shop/reservations', 'PUT /shop/items/{id}',
   'POST /shop/reservations/{id}/collect', 'POST /shop/reservations/{id}/release', 'POST /shop/reservations/{id}/returned',
   'POST /shop/reservations/{id}/set-aside', 'GET /shop/stats',
+  'GET /marketplace/listings', 'POST /marketplace/listings', 'GET /marketplace/mine',
+  'PUT /marketplace/listings/{id}', 'POST /marketplace/listings/{id}/contact',
+  'POST /marketplace/listings/{id}/report', 'GET /marketplace/inbox',
+  'GET /marketplace/threads/{id}', 'POST /marketplace/threads/{id}',
+  'GET /marketplace/reports', 'PUT /marketplace/listings/{id}/moderate',
+  'GET /marketplace/listings/{id}', 'GET /marketplace/listings/{id}/comments', 'POST /marketplace/listings/{id}/comments',
+  'PUT /marketplace/listings/{id}/comments/{commentId}',
+  'GET /marketplace/sellers', 'GET /marketplace/sellers/{id}',
+  'GET /marketplace/sellers/{id}/listings', 'GET /marketplace/sellers/{id}/reviews',
+  'GET /marketplace/profile', 'PUT /marketplace/profile',
+  'GET /marketplace/saved', 'GET /marketplace/saved/{id}', 'PUT /marketplace/saved/{id}',
+  'GET /marketplace/threads/{id}/exchange', 'PUT /marketplace/threads/{id}/exchange', 'POST /marketplace/threads/{id}/review',
 ].map((routeKey) => {
   const [method, path] = routeKey.split(' ');
-  return { routeKey, method, pattern: new RegExp(`^${path.replace('{id}', '([^/]+)')}$`) };
+  const params = [...path.matchAll(/\{(\w+)\}/g)].map((match) => match[1]);
+  return { routeKey, method, params, pattern: new RegExp(`^${path.replace(/\{\w+\}/g, '([^/]+)')}$`) };
 });
 const cors = {
   'access-control-allow-origin': '*',
-  'access-control-allow-headers': 'content-type,x-shop-key',
+  'access-control-allow-headers': 'content-type,x-shop-key,authorization',
   'access-control-allow-methods': 'GET,POST,PUT,OPTIONS',
+  'access-control-expose-headers': 'retry-after',
 };
+
+function localError(res, statusCode, error) {
+  res.writeHead(statusCode, { ...cors, 'content-type': 'application/json' });
+  res.end(JSON.stringify({ error }));
+}
 
 http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, cors);
     return res.end();
   }
-  let body = '';
-  for await (const chunk of req) body += chunk;
-  const { pathname } = new URL(req.url, 'http://localhost');
-  const route = routes.find(({ method, pattern }) => method === req.method && pattern.test(pathname));
-  const id = route?.pattern.exec(pathname)[1];
-  const out = route
-    ? await handler({
+  try {
+    const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+    const route = routes.find(({ method, pattern }) => method === req.method && pattern.test(pathname));
+    if (!route) return localError(res, 404, 'Not found');
+    const values = route.pattern.exec(pathname).slice(1);
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      size += chunk.length;
+      if (size > 8192) {
+        req.resume();
+        return localError(res, 413, 'Request is too large.');
+      }
+      chunks.push(chunk);
+    }
+    const dispatch = pathname.startsWith('/marketplace/') ? marketplace : handler;
+    const out = await dispatch({
       routeKey: route.routeKey,
-      pathParameters: id ? { id: decodeURIComponent(id) } : undefined,
+      pathParameters: Object.fromEntries(route.params.map((name, index) => [name, decodeURIComponent(values[index])])),
+      queryStringParameters: Object.fromEntries(searchParams),
       headers: req.headers,
-      body: body || undefined,
+      body: size ? Buffer.concat(chunks).toString('utf8') : undefined,
       requestContext: { http: { sourceIp: req.socket.remoteAddress } },
-    })
-    : { statusCode: 404, headers: { 'content-type': 'application/json' }, body: '{"error":"Not found"}' };
-  res.writeHead(out.statusCode, { ...out.headers, ...cors });
-  res.end(out.body);
-}).listen(port, () => console.log(`Astrashop API on http://localhost:${port}  (shop key: ${shopKey})`));
+    });
+    res.writeHead(out.statusCode, { ...out.headers, ...cors });
+    res.end(out.body);
+  } catch (error) {
+    if (!res.headersSent) localError(res, error instanceof URIError ? 400 : 500, 'Could not complete the request.');
+  }
+}).listen(port, host, () => console.log(`AstraShop API on http://${host}:${port}`));
 
 // Stands in for the 10-minute EventBridge schedule; every minute so short HOLD_MINUTES are easy to try.
 setInterval(() => handler({ source: 'aws.events' }).catch((err) => console.error(err)), 60_000);

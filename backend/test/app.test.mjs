@@ -28,6 +28,13 @@ function setup(stock = 1, options) {
 
 const counts = (expired, deferred = 0) => ({ expired, deferred, failed: 0 });
 
+test('a database connection failure returns a retryable response', async () => {
+  const { call, db } = setup();
+  db.send = async () => { throw Object.assign(new Error('Connection failed'), { code: 'ECONNREFUSED' }); };
+  assert.equal((await call('GET /items')).status, 503);
+  assert.equal((await call('POST /reservations', { body: { id: randomUUID(), itemId: 'item-1' } })).status, 503);
+});
+
 test('a hold expires after the hold window and its unit returns to the shelf', async () => {
   const { call, stockLeft, advance, sweep } = setup(1);
   const id = randomUUID();

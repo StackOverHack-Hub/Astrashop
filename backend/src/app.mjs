@@ -1,4 +1,5 @@
 import { randomInt, timingSafeEqual } from 'node:crypto';
+import { dependencyUnavailable } from './dependency-errors.mjs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient, ScanCommand, GetCommand, UpdateCommand, TransactWriteCommand,
@@ -290,7 +291,7 @@ export function makeHandler(db, { itemsTable, reservationsTable, shopKey, holdMi
     try {
       return await route({ body, params: event.pathParameters ?? {} });
     } catch (err) {
-      if (TRANSIENT.has(err.name)) return json(503, { error: 'Busy, try again' });
+      if (TRANSIENT.has(err.name) || dependencyUnavailable(err)) return { ...json(503, { error: 'Busy, try again' }), headers: { 'content-type': 'application/json', 'retry-after': '2' } };
       console.error(err);
       return json(500, { error: 'Something went wrong' });
     }
