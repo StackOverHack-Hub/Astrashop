@@ -1,0 +1,36 @@
+# Reuse the local image with managed AWS services. This file provisions nothing.
+services:
+  app:
+    image: ${ASTRASHOP_IMAGE:-astrashop:local}
+    init: true
+    ports: ["127.0.0.1:${ASTRASHOP_PORT:-8080}:8080"]
+    environment:
+      APP_ENV: production
+      AUTH_MODE: cognito
+      AWS_REGION: ${AWS_REGION:?Set AWS_REGION}
+      ITEMS_TABLE: ${ITEMS_TABLE:?Set ITEMS_TABLE}
+      RESERVATIONS_TABLE: ${RESERVATIONS_TABLE:?Set RESERVATIONS_TABLE}
+      MARKETPLACE_TABLE: ${MARKETPLACE_TABLE:?Set MARKETPLACE_TABLE}
+      SHOP_KEY_FILE: /run/secrets/shop_key
+      REDIS_HOST: ${REDIS_HOST:?Set REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_TLS: "true"
+      REDIS_CLUSTER: ${REDIS_CLUSTER:-true}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:?Set COGNITO_USER_POOL_ID}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:?Set COGNITO_CLIENT_ID}
+      COGNITO_LOGIN_ORIGIN: ${COGNITO_LOGIN_ORIGIN:?Set COGNITO_LOGIN_ORIGIN}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:?Set ALLOWED_ORIGIN}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+    secrets: [shop_key, redis_password]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 512m
+secrets:
+  shop_key:
+    file: ${SHOP_KEY_PATH:?Set SHOP_KEY_PATH}
+  redis_password:
+    file: ${REDIS_PASSWORD_PATH:?Set REDIS_PASSWORD_PATH}

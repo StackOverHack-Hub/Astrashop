@@ -1,3 +1,5 @@
+import { runtime } from './runtime';
+
 export type Item = {
   id: string;
   name: string;
@@ -42,7 +44,7 @@ export class ApiError extends Error {
 class NetworkError extends Error {}
 
 // In `npm run dev` the API defaults to the local server (backend: npm run local).
-const baseUrl = (import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:8787' : ''))
+const baseUrl = (runtime.apiUrl ?? import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:8787' : ''))
   .trim().replace(/\/+$/, '');
 
 async function request<T>(path: string, { method = 'GET', body, shopKey }: {

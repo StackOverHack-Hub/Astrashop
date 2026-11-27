@@ -4,5 +4,8 @@ dist/
 # sam deploy --guided can write parameter values here
 samconfig.toml
 .env*
+!.env.example
+!.env.aws.example
+artifacts/
 # Extra local working copies
 .worktrees/

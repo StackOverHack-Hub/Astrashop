@@ -1,0 +1,77 @@
+name: astrashop
+services:
+  app:
+    image: astrashop:local
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ASTRASHOP_PORT:-8080}:8080"
+    environment:
+      APP_ENV: local
+      AUTH_MODE: demo
+      AWS_REGION: us-east-1
+      DYNAMO_ENDPOINT: http://dynamodb:8000
+      ITEMS_TABLE: ${ITEMS_TABLE:-astrashop-items}
+      RESERVATIONS_TABLE: ${RESERVATIONS_TABLE:-astrashop-reservations}
+      MARKETPLACE_TABLE: ${MARKETPLACE_TABLE:-astrashop-marketplace}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CLUSTER: "false"
+      REDIS_TLS: "false"
+      SHOP_KEY: ${SHOP_KEY:-local-shop-key}
+      HOLD_MINUTES: ${HOLD_MINUTES:-1440}
+      ALLOWED_ORIGIN: http://localhost:${ASTRASHOP_PORT:-8080}
+      LOCAL_TEST_USERS: ${LOCAL_TEST_USERS:-0}
+    depends_on:
+      dynamodb:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.2
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data", "-disableTelemetry"]
+    working_dir: /home/dynamodblocal
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+  dynamodb-init:
+    image: amazon/dynamodb-local:3.3.2
+    user: "0:0"
+    entrypoint: [/bin/sh, -c]
+    command: ["chown 1000:1000 /data"]
+    volumes:
+      - dynamodb-data:/data
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+  redis:
+    image: redis:7.2.12-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+    mem_limit: 128m
+    cpus: 0.5
+volumes:
+  dynamodb-data:
+  redis-data:
