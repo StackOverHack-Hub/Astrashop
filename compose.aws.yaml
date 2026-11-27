@@ -13,6 +13,9 @@ services:
       MARKETPLACE_TABLE: ${MARKETPLACE_TABLE:?Set MARKETPLACE_TABLE}
       TENANCY_TABLE: ${TENANCY_TABLE:?Set TENANCY_TABLE}
       DEFAULT_SHOP_ID: ${DEFAULT_SHOP_ID:-campus-shop}
+      # Optional: item photos in S3, served from a CDN (template.yaml outputs PhotoBucketName and PhotoBaseUrl).
+      PHOTO_BUCKET: ${PHOTO_BUCKET:-}
+      PHOTO_BASE_URL: ${PHOTO_BASE_URL:-}
       SHOP_KEY_FILE: /run/secrets/shop_key
       REDIS_HOST: ${REDIS_HOST:?Set REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT:-6379}

@@ -121,15 +121,20 @@ Resources:
         - { AttributeName: expiresAt, AttributeType: S }
         - { AttributeName: shopId, AttributeType: S }
         - { AttributeName: createdAt, AttributeType: S }
+        - { AttributeName: studentId, AttributeType: S }
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
       # queueShop exists only while a hold needs the counter, so Queue stays small.
-      # ByShopCreated serves shop stats over a window of days (added in its own deploy, after Queue).
+      # ByShopCreated serves shop stats over a window of days, ByStudent a student's passes on any device.
+      # Each was added in its own deploy: Queue, then ByShopCreated, then ByStudent.
       GlobalSecondaryIndexes:
         - IndexName: Queue
           KeySchema: [{ AttributeName: queueShop, KeyType: HASH }, { AttributeName: expiresAt, KeyType: RANGE }]
           Projection: { ProjectionType: ALL }
         - IndexName: ByShopCreated
           KeySchema: [{ AttributeName: shopId, KeyType: HASH }, { AttributeName: createdAt, KeyType: RANGE }]
+          Projection: { ProjectionType: ALL }
+        - IndexName: ByStudent
+          KeySchema: [{ AttributeName: studentId, KeyType: HASH }, { AttributeName: createdAt, KeyType: RANGE }]
           Projection: { ProjectionType: ALL }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
@@ -146,6 +151,61 @@ Resources:
       KeySchema: [{ AttributeName: pk, KeyType: HASH }, { AttributeName: sk, KeyType: RANGE }]
       TimeToLiveSpecification: { AttributeName: expires, Enabled: true }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # Item photos: a private bucket that only CloudFront can read. Photo names come from their content,
+  # so every file is cached for a year.
+  PhotoBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }] }
+
+  PhotoOriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-photos'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  PhotoCdn:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: photos
+            DomainName: !GetAtt PhotoBucket.RegionalDomainName
+            S3OriginConfig: { OriginAccessIdentity: '' }
+            OriginAccessControlId: !GetAtt PhotoOriginAccess.Id
+        DefaultCacheBehavior:
+          TargetOriginId: photos
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          # Managed policies: CachingOptimized, and SecurityHeadersPolicy (nosniff, HSTS and more).
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+
+  PhotoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PhotoBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub '${PhotoBucket.Arn}/items/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${PhotoCdn}'
 
   ApiFunction:
     Type: AWS::Serverless::Function
@@ -165,6 +225,8 @@ Resources:
           SHOP_KEY: !Ref ShopKey
           DEFAULT_SHOP_ID: !Ref DefaultShopId
           HOLD_MINUTES: !Ref HoldMinutes
+          PHOTO_BUCKET: !Ref PhotoBucket
+          PHOTO_BASE_URL: !Sub 'https://${PhotoCdn.DomainName}'
       # Only the actions the code uses; transactions authorize as their parts.
       Policies:
         - Statement:
@@ -176,13 +238,19 @@ Resources:
                 - !GetAtt TenancyTable.Arn
                 - !Sub '${ItemsTable.Arn}/index/*'
                 - !Sub '${ReservationsTable.Arn}/index/*'
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub '${PhotoBucket.Arn}/items/*'
       Events:
         # Open to anyone: browsing, and a pickup pass read by its secret reservation id.
         ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET, Auth: { Authorizer: NONE } } }
         ShopItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items', Method: GET, Auth: { Authorizer: NONE } } }
+        Shops: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shops, Method: GET, Auth: { Authorizer: NONE } } }
         GetReservation: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/reservations/{id}', Method: GET, Auth: { Authorizer: NONE } } }
         # Signed in; the function checks the shop role for each request.
         Me: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /me, Method: GET } }
+        MyPasses: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /me/reservations, Method: GET } }
+        Photo: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items/{id}/photo', Method: PUT } }
         Reserve: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /reservations, Method: POST } }
         Queue: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations', Method: GET } }
         Stats: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/stats', Method: GET } }
@@ -262,3 +330,8 @@ Outputs:
     Value: !Ref ReservationsTable
   TenancyTableName:
     Value: !Ref TenancyTable
+  PhotoBucketName:
+    Value: !Ref PhotoBucket
+  PhotoBaseUrl:
+    Description: Add this origin to img-src in the Amplify Content-Security-Policy.
+    Value: !Sub 'https://${PhotoCdn.DomainName}'

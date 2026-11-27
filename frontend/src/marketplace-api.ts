@@ -39,8 +39,9 @@ type Session = { access: string; expires: number; refresh?: string };
 // Local demo accounts: three students, a marketplace moderator, the demo shop's owner and staff, and a platform admin.
 const demoAccounts = ['asha', 'ravi', 'neha', 'moderator', 'owner', 'staff', 'admin'] as const;
 export type DemoIdentity = '' | typeof demoAccounts[number];
-// Where a sign-in may return to: the item list, the shop admin (including an invite link), or a marketplace page.
-const destinations = /^(#marketplace(\/(listing|seller)\/[a-f0-9-]+)?|#shop|#admin(\/[a-z]+|\/join\/[A-Za-z0-9_-]{32})?|)$/;
+// Where a sign-in may return to: the item list or an item page, the shop admin (including an invite link),
+// or a marketplace page.
+const destinations = /^(#marketplace(\/(listing|seller)\/[a-f0-9-]+)?|#item\/[a-z0-9-]{1,40}\/[A-Za-z0-9%._~-]{1,400}|#shop|#admin(\/[a-z]+|\/join\/[A-Za-z0-9_-]{32})?|)$/;
 let cached: Session | undefined;
 let refreshInFlight: Promise<Session> | undefined;
 const retryWindows = new Map<string, number>();

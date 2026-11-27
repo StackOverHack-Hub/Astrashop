@@ -18,6 +18,8 @@ COPY --from=dependencies --chown=node:node /app/backend/node_modules ./node_modu
 COPY --chown=node:node backend/package.json backend/server.mjs backend/sample-items.mjs ./
 COPY --chown=node:node backend/src ./src
 COPY --from=frontend --chown=node:node /build/dist /app/public
+# Local photo storage. A named volume mounted here starts with this owner, so the app can write to it.
+RUN mkdir -p /data/photos && chown node:node /data/photos
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=100s --retries=3 \

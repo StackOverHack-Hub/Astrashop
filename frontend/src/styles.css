@@ -168,12 +168,14 @@ textarea.field-control { resize: vertical; }
 .entries { display: grid; gap: var(--card-gap); }
 .entry {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 1rem;
-  grid-template-rows: var(--line) auto calc(var(--line) * 2) var(--line) var(--line);
-  grid-template-areas: 'course course' 'name name' 'price action' 'avail avail' 'meta meta';
-  padding: .65rem .85rem .85rem; line-height: var(--line);
+  grid-template-rows: auto var(--line) auto calc(var(--line) * 2) var(--line) var(--line);
+  grid-template-areas: 'photo photo' 'course course' 'name name' 'price action' 'avail avail' 'meta meta';
+  padding: .65rem .85rem .85rem; line-height: var(--line); overflow: hidden;
   border: 1px solid var(--rule-strong); border-radius: var(--control-radius); background: var(--sheet);
 }
 .entry-course { grid-area: course; color: var(--graphite); font-size: .85rem; }
+.entry-name a { color: inherit; text-decoration: none; }
+.entry-name a:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .2em; }
 .entry-name { grid-area: name; font-size: 1.15rem; font-weight: 600; letter-spacing: -.015em; line-height: var(--line); overflow-wrap: anywhere; }
 .price { font-size: 1.9rem; font-weight: 700; letter-spacing: -.035em; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .entry-price { grid-area: price; line-height: calc(var(--line) * 2); }
@@ -296,8 +298,8 @@ textarea.field-control { resize: vertical; }
 /* Separate prices from long reservation actions on narrow phones. */
 @media (max-width: 22rem) {
   .entry {
-    grid-template-rows: var(--line) auto calc(var(--line) * 2) auto var(--line) var(--line);
-    grid-template-areas: 'course course' 'name name' 'price price' 'action action' 'avail avail' 'meta meta';
+    grid-template-rows: auto var(--line) auto calc(var(--line) * 2) auto var(--line) var(--line);
+    grid-template-areas: 'photo photo' 'course course' 'name name' 'price price' 'action action' 'avail avail' 'meta meta';
   }
   .entry .reserve { justify-self: stretch; margin-bottom: .4rem; }
 }
@@ -519,3 +521,63 @@ textarea.field-control { resize: vertical; }
 .join .reserve { display: inline-block; text-decoration: none; }
 .invite .field-control { width: auto; }
 .counter-title { font-size: var(--section-title); }
+
+/* Storefront: photos on cards and item pages. Without a photo, a ruled label with the item's initials. */
+.entry-photo-link { grid-area: photo; display: block; margin: -.65rem -.85rem .55rem; text-decoration: none; }
+.entry-photo, .item-photo { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--blue-wash); }
+.is-blank {
+  display: grid; place-items: center; border-bottom: 1px solid var(--rule);
+  background-color: var(--sheet);
+  background-image: linear-gradient(to bottom, transparent calc(var(--line) - 1px), var(--rule) calc(var(--line) - 1px));
+  background-size: 100% var(--line);
+}
+.is-blank span { font-size: 2.6rem; font-weight: 700; letter-spacing: -.04em; color: var(--blue); opacity: .8; }
+.skeleton .entry-photo { width: auto; height: auto; aspect-ratio: 4 / 3; margin: -.65rem -.85rem .55rem; padding: 0; border-radius: 0; }
+.catalog-column { min-width: 0; }
+.shop-picker { display: inline-flex; align-items: center; gap: .4rem; color: var(--graphite); font-size: .85rem; }
+.shop-picker select {
+  min-height: 2rem; padding: 0 .4rem; border: 1px solid var(--rule-strong); border-radius: .4rem;
+  background: var(--sheet); color: var(--ink); font-weight: 600;
+}
+.from-students { margin-top: var(--section-gap); }
+.from-students-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .4rem 1rem; margin-bottom: .9rem; }
+.from-students-head h2 { font-size: var(--section-title); font-weight: 650; letter-spacing: -.015em; }
+.from-students-head a, .back-link { color: var(--blue); font-weight: 600; }
+.back-link { display: inline-flex; align-items: center; min-height: var(--target); margin-bottom: .75rem; text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
+.item-layout { display: grid; gap: 1.5rem; min-width: 0; }
+.item-photo { border-radius: var(--surface-radius); box-shadow: var(--shadow); }
+.item-photo.is-blank span { font-size: 5.5rem; }
+.item-page { min-width: 0; container-type: inline-size; }
+.item-details { display: grid; gap: .65rem; align-content: start; min-width: 0; }
+.item-details > * { grid-area: auto; } /* the card's named grid areas don't apply here */
+.item-title { font-size: clamp(1.9rem, 5vw, 2.6rem); overflow-wrap: anywhere; }
+.item-price { font-size: 2.7rem; }
+.item-facts { display: grid; gap: .45rem; margin: .35rem 0; }
+.item-facts div { display: flex; gap: .75rem; padding-top: .45rem; border-top: 1px solid var(--rule); }
+.item-facts dt { min-width: 7.5rem; color: var(--graphite); }
+.item-facts dd { font-weight: 500; }
+.item-reserve { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.item-reserve .price { display: none; }
+
+/* Phones: the price and Reserve stay in reach at the bottom of the screen while reading. */
+@media (max-width: 45.99rem) {
+  .item-reserve {
+    position: sticky; bottom: 0; z-index: 2; margin-inline: -1rem;
+    padding: .7rem 1rem calc(.7rem + env(safe-area-inset-bottom));
+    background: var(--paper); border-top: 1px solid var(--rule-strong); box-shadow: 0 -10px 20px -18px rgb(24 33 58 / .5);
+  }
+  .item-reserve .price { display: block; font-size: 1.6rem; }
+  .item-reserve .reserve { flex: 1; max-width: 16rem; }
+}
+/* Photo beside the details only when the page itself has room, whatever the passes column takes. */
+@container (min-width: 40rem) {
+  .item-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 2rem; }
+}
+.admin-thumb { flex: none; width: 3.5rem; aspect-ratio: 4 / 3; object-fit: cover; border-radius: .35rem; border: 1px solid var(--rule); }
+.admin-row > div:first-of-type { flex: 1 1 16rem; min-width: 0; }
+.photo-field { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; width: 100%; }
+.photo-field img { width: 9rem; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--control-radius); border: 1px solid var(--rule); }
+.photo-field label.text-button { width: auto; cursor: pointer; }
+.photo-field label.text-button:focus-within { outline: 3px solid var(--blue); outline-offset: 2px; }
+.photo-field .notice { flex-basis: 100%; }

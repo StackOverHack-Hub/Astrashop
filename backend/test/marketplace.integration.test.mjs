@@ -4,7 +4,7 @@ import test from 'node:test';
 import { CreateTableCommand, DeleteTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import Redis from 'ioredis';
-import { makeMarketplace } from '../src/marketplace.mjs';
+import { backfillListingWords, makeMarketplace } from '../src/marketplace.mjs';
 import { dynamoMarketplace } from '../src/marketplace-store.mjs';
 import { tokenBucket } from '../src/marketplace-limit.mjs';
 
@@ -62,6 +62,16 @@ test('DynamoDB transactions and key ranges preserve browse, ownership and thread
     assert.equal(second.body.entries.length, 5);
     assert.equal(new Set([...first.body.entries, ...second.body.entries].map(({ id }) => id)).size, 25);
   }
+  assert.deepEqual((await list({ q: 'lesson 7' })).body.entries.map(({ title }) => title), ['Mini lesson 7'], 'every word must match');
+  // A listing stored the way it was before word search is found again after the backfill.
+  const wordRow = await store.get('WORD#item', `drafter\u0001${item.id}`);
+  await store.transact([
+    ...['drafter', 'mini'].map((word) => ({ kind: 'delete', row: { pk: 'WORD#item', sk: `${word}\u0001${item.id}` } })),
+    { kind: 'put', row: { ...wordRow, pk: 'TITLE#item', sk: `mini drafter\u0001${item.id}` } },
+  ]);
+  assert.equal((await list({ q: 'drafter' })).body.entries.length, 0);
+  assert.equal(await backfillListingWords(store), 1);
+  assert.deepEqual((await list({ q: 'drafter' })).body.entries.map(({ id }) => id), [item.id]);
   const mine = await call('GET /marketplace/mine', { actor: 'owner' });
   const more = await call('GET /marketplace/mine', { actor: 'owner', query: { cursor: mine.body.next } });
   assert.equal(more.body.entries.length, 5);

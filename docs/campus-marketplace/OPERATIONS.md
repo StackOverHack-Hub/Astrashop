@@ -46,6 +46,12 @@ sam deploy --resolve-s3 --capabilities CAPABILITY_IAM \
     "ResourcePrefix=$ASTRASHOP_MARKETPLACE_PREFIX"
 ```
 
+After a deploy that brings word search, move existing listings onto it once (safe to repeat):
+
+```bash
+node migrate-search.mjs <MarketplaceTableName>
+```
+
 Copy these stack outputs to the frontend build environment. Keep the existing `VITE_API_URL` for the campus shop.
 
 | Stack output | Frontend build variable |

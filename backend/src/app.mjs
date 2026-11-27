@@ -1,6 +1,7 @@
-import { randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dependencyUnavailable } from './dependency-errors.mjs';
 import { digest, signedInUser } from './marketplace-shared.mjs';
+import { photoTypes, s3Photos } from './photo-store.mjs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient, QueryCommand, GetCommand, TransactWriteCommand,
@@ -12,6 +13,13 @@ const MAX_ID = 128;
 const MAX_STOCK = 100000;
 const AUDIT_DAYS = 365;
 const INVITE_DAYS = 7;
+// Photos arrive resized in the browser (about 100-250 KB); anything bigger is refused.
+const MAX_PHOTO_BYTES = 600_000;
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+// What the file really is, from its first bytes, whatever the browser called it.
+const photoKind = (bytes) => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'jpg'
+  : bytes.subarray(0, 8).equals(PNG) ? 'png'
+  : bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP' ? 'webp' : undefined;
 const MAX_PRICE = 100000;
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{32}$/;
 const SHOP_STATUSES = ['trial', 'active', 'suspended'];
@@ -45,7 +53,10 @@ const view = ({ queueShop, studentId, ...reservation }) => reservation;
 // Shop routes as the people who use them: anyone, a signed-in student, the shop's staff or owner,
 // or a platform admin. A route that is not listed here does not exist.
 const access = {
+  'GET /shops': 'public',
   'GET /shops/{shopId}/items': 'public',
+  'GET /me/reservations': 'signedIn',
+  'PUT /shops/{shopId}/items/{id}/photo': 'owner',
   'POST /invites/accept': 'signedIn',
   'GET /shops/{shopId}/catalog': 'staff',
   'POST /shops/{shopId}/items': 'owner',
@@ -79,8 +90,9 @@ export function shopActor(event) {
 
 export function makeHandler(db, {
   itemsTable, reservationsTable, tenancyTable, shopKey, defaultShopId = 'campus-shop',
-  holdMinutes = 1440, maxHolds = 3, actorFrom = shopActor, now = () => new Date(),
+  holdMinutes = 1440, maxHolds = 3, actorFrom = shopActor, now = () => new Date(), photos,
 }) {
+  const withPhoto = (item) => item.photoKey && photos ? { ...item, photoUrl: `${photos.baseUrl}/${item.photoKey}` } : item;
   // shortcut: the shared counter key from the single-shop pilot still opens that shop's counter.
   // Remove it (unset SHOP_KEY) once the pilot shop's staff sign in with accounts.
   const isShop = (headers = {}) => {
@@ -207,16 +219,66 @@ export function makeHandler(db, {
 
   const routes = {
     // Items the owner has taken off sale stay in the counter's catalog but not in the public one.
-    'GET /shops/{shopId}/items': async ({ params }) => json(200, await readAll(QueryCommand, {
+    // Shops students can reserve from, the default (pilot) shop first.
+    'GET /shops': async () => {
+      const shops = await readAll(QueryCommand, {
+        TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'SHOP' },
+      });
+      return json(200, shops.filter(({ status }) => status !== 'suspended')
+        .map(({ sk, name, pickupWindow = '' }) => ({ id: sk, name, pickupWindow, default: sk === defaultShopId }))
+        .sort((a, b) => Number(b.default) - Number(a.default) || a.name.localeCompare(b.name)));
+    },
+
+    'GET /shops/{shopId}/items': async ({ params }) => json(200, (await readAll(QueryCommand, {
       TableName: itemsTable, IndexName: 'ByShop', KeyConditionExpression: 'shopId = :shop',
       FilterExpression: 'attribute_not_exists(active) OR active = :yes',
       ExpressionAttributeValues: { ':shop': params.shopId, ':yes': true },
-    })),
+    })).map(withPhoto)),
 
-    'GET /shops/{shopId}/catalog': async ({ params }) => json(200, await readAll(QueryCommand, {
+    'GET /shops/{shopId}/catalog': async ({ params }) => json(200, (await readAll(QueryCommand, {
       TableName: itemsTable, IndexName: 'ByShop', KeyConditionExpression: 'shopId = :shop',
       ExpressionAttributeValues: { ':shop': params.shopId },
-    })),
+    })).map(withPhoto)),
+
+    // The student's 20 most recent holds on any device, with what they need to show at the counter.
+    'GET /me/reservations': async ({ actor }) => {
+      const page = await db.send(new QueryCommand({
+        TableName: reservationsTable, IndexName: 'ByStudent', KeyConditionExpression: 'studentId = :me',
+        ExpressionAttributeValues: { ':me': actor.id }, ScanIndexForward: false, Limit: 20,
+      }));
+      const rows = page.Items ?? [];
+      const items = new Map(await Promise.all([...new Set(rows.map(({ itemId }) => itemId))]
+        .map(async (id) => [id, await get(itemsTable, { id })])));
+      return json(200, rows.map((r) => {
+        const item = items.get(r.itemId);
+        return { ...view(r), itemName: item?.name ?? 'Item', pickupWindow: item?.pickupWindow ?? '', ...(item?.sample ? { sample: true } : {}) };
+      }));
+    },
+
+    // { data: base64 } replaces the photo; { data: null } removes it.
+    'PUT /shops/{shopId}/items/{id}/photo': async ({ params, body, actor }) => {
+      if (!photos) return json(501, { error: 'Photo storage is not set up on this server.' });
+      const item = isItemId(params.id) && await get(itemsTable, { id: params.id });
+      if (!item || shopOf(item) !== params.shopId) return json(404, { error: 'Item not found' });
+      let photoKey;
+      if (body.data !== null) {
+        const bytes = typeof body.data === 'string' && body.data.length <= Math.ceil(MAX_PHOTO_BYTES / 3) * 4
+          ? Buffer.from(body.data, 'base64') : Buffer.alloc(0);
+        const kind = bytes.length > 0 && bytes.length <= MAX_PHOTO_BYTES ? photoKind(bytes) : undefined;
+        if (!kind) return json(400, { error: 'Send a JPEG, PNG or WebP photo of up to 600 KB.' });
+        photoKey = `items/${params.shopId}/${createHash('sha256').update(bytes).digest('hex')}.${kind}`;
+        await photos.put(photoKey, bytes, photoTypes[kind]);
+      }
+      await db.send(new TransactWriteCommand({ TransactItems: [
+        { Update: {
+          TableName: itemsTable, Key: { id: item.id }, ConditionExpression: 'attribute_exists(id)',
+          ...(photoKey ? { UpdateExpression: 'SET photoKey = :key', ExpressionAttributeValues: { ':key': photoKey } } : { UpdateExpression: 'REMOVE photoKey' }),
+        } },
+        audit(params.shopId, actor, 'photo', item.id, { removed: !photoKey }),
+      ] }));
+      const { photoKey: _old, ...rest } = item;
+      return json(200, withPhoto(photoKey ? { ...rest, photoKey } : rest));
+    },
 
     'GET /me': async ({ actor }) => {
       const memberships = await readAll(QueryCommand, {
@@ -502,7 +564,7 @@ export function makeHandler(db, {
         if (err.name !== 'TransactionCanceledException') throw err;
         if (cancelled(err)[0] !== 'ConditionalCheckFailed') return json(503, { error: 'Busy, try again' });
         const existing = await get(itemsTable, { id: item.id });
-        return existing?.shopId === params.shopId && existing.name === item.name ? json(200, existing) : json(409, { error: 'Item id already used' });
+        return existing?.shopId === params.shopId && existing.name === item.name ? json(200, withPhoto(existing)) : json(409, { error: 'Item id already used' });
       }
     },
 
@@ -531,7 +593,7 @@ export function makeHandler(db, {
             after: { name: fields.name, price: fields.price, active: body.active },
           }),
         ] }));
-        return json(200, { ...item, ...fields, active: body.active, version: (item.version ?? 0) + 1 });
+        return json(200, withPhoto({ ...item, ...fields, active: body.active, version: (item.version ?? 0) + 1 }));
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
         return cancelled(err)[0] === 'ConditionalCheckFailed'
@@ -752,4 +814,5 @@ export const handler = makeHandler(DynamoDBDocumentClient.from(new DynamoDBClien
   shopKey: process.env.SHOP_KEY,
   defaultShopId: process.env.DEFAULT_SHOP_ID || undefined,
   holdMinutes: Number(process.env.HOLD_MINUTES) || 1440,
+  photos: process.env.PHOTO_BUCKET ? s3Photos({ bucket: process.env.PHOTO_BUCKET, baseUrl: process.env.PHOTO_BASE_URL }) : undefined,
 });

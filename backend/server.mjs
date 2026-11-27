@@ -4,7 +4,8 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { tokenVerifier } from './src/container-auth.mjs';
 import { makeHandler } from './src/app.mjs';
-import { makeMarketplace } from './src/marketplace.mjs';
+import { backfillListingWords, makeMarketplace } from './src/marketplace.mjs';
+import { diskPhotos, s3Photos } from './src/photo-store.mjs';
 import { dynamoMarketplace } from './src/marketplace-store.mjs';
 import { redisLimiter } from './src/marketplace-limit.mjs';
 import { containerConfig } from './src/container-config.mjs';
@@ -39,9 +40,11 @@ export async function startContainer(env = process.env) {
   const limit = redisLimiter(config.redis);
   const store = dynamoMarketplace(db, config.tables.marketplace);
   const marketplace = makeMarketplace(store, limit);
+  const photos = !config.photos ? undefined
+    : config.photos.dir ? diskPhotos(config.photos) : s3Photos(config.photos);
   const shopHandler = makeHandler(db, {
     itemsTable: config.tables.items, reservationsTable: config.tables.reservations, tenancyTable: config.tables.tenancy,
-    shopKey: config.shopKey, defaultShopId: config.defaultShopId, holdMinutes: config.holdMinutes,
+    shopKey: config.shopKey, defaultShopId: config.defaultShopId, holdMinutes: config.holdMinutes, photos,
   });
   const shop = async (event) => {
     if (event.source === 'aws.events') return shopHandler(event);
@@ -65,6 +68,7 @@ export async function startContainer(env = process.env) {
       shopId: config.defaultShopId, name: 'Campus stationery shop', pickupWindow: 'Mon–Sat, 10 am–6 pm', holdMinutes: config.holdMinutes,
     });
     await seedLocalShop(shopHandler, identities, config.defaultShopId);
+    await backfillListingWords(store);
     await seedLocalMarketplace(makeMarketplace(store, async () => 0), identities);
   }
   const verify = tokenVerifier(config, identities);
@@ -76,7 +80,7 @@ export async function startContainer(env = process.env) {
     ]);
   };
   const server = createHttpServer({
-    shop, marketplace, verify, readiness,
+    shop, marketplace, verify, readiness, photos,
     publicDir: config.publicDir ?? resolve(import.meta.dirname, '../frontend/dist'),
     publicConfig: config.publicConfig, allowedOrigin: config.allowedOrigin,
     trustProxyHops: config.trustProxyHops, production: !config.local,

@@ -12,7 +12,13 @@ export type Item = {
   sample?: boolean;
   version?: number;
   active?: boolean;
+  photoUrl?: string;
+  shopId?: string;
 };
+
+export type ShopInfo = { id: string; name: string; pickupWindow: string; default: boolean };
+// A hold as the student's account sees it, on any device.
+export type MyReservation = Reservation & { itemName: string; pickupWindow: string; sample?: boolean };
 
 export type Reservation = {
   id: string;
@@ -111,6 +117,9 @@ const counterPath = (counter: Counter, path: string) =>
   'key' in counter ? `/shop${path}` : `/shops/${encodeURIComponent(counter.shopId)}${path}`;
 
 export const getItems = () => request<Item[]>('/items');
+export const getShops = () => request<ShopInfo[]>('/shops');
+export const getShopItems = (shopId: string) => request<Item[]>(`/shops/${encodeURIComponent(shopId)}/items`);
+export const getMyReservations = () => request<MyReservation[]>('/me/reservations', { signedIn: true });
 export const getMe = () => request<Me>('/me', { signedIn: true });
 export const getReservation = (id: string) => request<Reservation>(`/reservations/${encodeURIComponent(id)}`);
 export const getShopReservations = (counter: Counter) => request<Reservation[]>(counterPath(counter, '/reservations'), { counter });
@@ -165,3 +174,28 @@ export const createShop = (shop: { id: string; name: string; pickupWindow: strin
 export const setShopStatus = (shopId: string, status: ShopStatus) =>
   signed<{ id: string; status: ShopStatus }>(`/admin/shops/${encodeURIComponent(shopId)}`, 'PUT', { status });
 export const inviteLink = (token: string) => `${location.origin}/#admin/join/${token}`;
+// data is the photo as base64 (resized in the browser first), or null to remove it.
+export const uploadPhoto = (shopId: string, id: string, data: string | null) =>
+  signed<Item>(shopPath(shopId, `/items/${encodeURIComponent(id)}/photo`), 'PUT', { data });
+
+// Shrinks a photo to at most 1200 px on its long side, as a JPEG of about 100-250 KB, and returns it as base64.
+export async function resizePhoto(file: File) {
+  // Some Safari versions reject the options argument; the plain call still reads the photo.
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => createImageBitmap(file)).catch(() => {
+    throw new Error('This file could not be read as a photo. Try a JPEG or PNG.');
+  });
+  const scale = Math.min(1, 1200 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const context = canvas.getContext('2d')!;
+  context.fillStyle = '#fff'; // transparent PNGs get a white background instead of black
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise<Blob | null>((done) => canvas.toBlob(done, 'image/jpeg', 0.82));
+  if (!blob) throw new Error('This photo could not be prepared. Try another one.');
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}

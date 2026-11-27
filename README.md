@@ -58,6 +58,17 @@ Many shops run on one deployment. Everyone signs in with the campus Cognito acco
   - **Shops:** platform admins, who open shops, send owner invites and suspend a shop. A suspended shop takes no new reservations.
   
   The console loads separately, so students never download it.
+- **Storefront.**
+  - Students pick a shop when there is more than one; the default shop comes first.
+  - Items show photos, or an initials label in the notebook style when there is none.
+  - Every item has its own page at `#item/<shop>/<item>`. It's a plain link, so it can be shared, and on phones the price and **Reserve** stay pinned to the bottom of the screen.
+  - Searching also shows matching offers **From students** in the marketplace.
+  - Pickup passes come from the student's account, so they follow the student to any device.
+- **Photos.**
+  - Owners add a photo from the catalog. The browser shrinks it to 1200 px on its long side, as a JPEG of about 100-250 KB, before uploading.
+  - The API keeps only real JPEG, PNG or WebP files of up to 600 KB, checking the file's first bytes rather than trusting its name. Each file is named by its own content hash, so it can be cached for a year.
+  - Storage is S3 behind CloudFront on AWS, a Docker volume locally, and memory in the lightweight preview.
+- **Marketplace search** matches any word of a title, or the start of one: "sheet" finds "A2 drawing sheet". When several words are typed, every one must match.
 - **The pilot shop.** Data from before shops existed belongs to the default shop (`DefaultShopId`). The `/shop/*` routes and the shared counter key still open that one shop's counter until its staff sign in with accounts. Unset the key to switch it off.
 
 Every hold has an `expiresAt` (24 hours by default, set by `HoldMinutes`). Every 10 minutes a scheduled run marks overdue holds `EXPIRED` and puts their units back, using the same all-or-nothing write as a release. Expired holds count as no-shows in the dashboard. **Expired pickups** lists each hold until the shopkeeper taps **Back on shelf**, even if the shop was closed for days. The shopkeeper returns any set-aside units before confirming a recount. A hold can still be collected in the few minutes between its deadline and the next expiry run, which gives late students a short grace period. Choose `HoldMinutes` around the shop's hours. A 24-hour hold placed at 5 p.m. on Saturday runs out on Sunday while the shop is closed.
@@ -69,7 +80,10 @@ Signed-in routes take the campus access token as `Authorization: Bearer …`. Th
 | Method | Path | Who | What it does |
 |---|---|---|---|
 | GET | `/shops/{shopId}/items` | anyone | A shop's catalog, sorted by name |
+| GET | `/shops` | anyone | Shops taking reservations, the default shop first |
 | GET | `/me` | signed in | Your account and the shops where you're staff or owner |
+| GET | `/me/reservations` | signed in | Your 20 most recent holds on any device, with item name and hours |
+| PUT | `/shops/{shopId}/items/{id}/photo` | owner | `{ data }`: the photo as base64, up to 600 KB, or `null` to remove it. The response includes `photoUrl`. |
 | PUT | `/shops/{shopId}/staff/{userId}` | owner | `{ role: "owner" \| "staff" \| null }` changes or removes someone's access to the shop (not your own) |
 | GET | `/shops/{shopId}/staff` | owner | Staff with their roles and the names they gave when joining |
 | POST | `/shops/{shopId}/invites` | owner | `{ role }` makes a single-use link token, valid 7 days. Only a digest is stored. |
@@ -214,11 +228,12 @@ aws cognito-idp admin-create-user --user-pool-id <CognitoUserPoolId> --username 
 
 To open more shops, add a platform admin to the `PlatformAdmins` Cognito group. That admin opens the shop under **For shops → Shops** and sends the owner the invite link.
 
-**Upgrading the single-shop pilot takes two deploys.** CloudFormation adds only one index per table per deploy, and Phases 1 and 2 each add one to the reservations table.
+**Upgrading the single-shop pilot takes three deploys.** CloudFormation adds only one index per table per deploy, and Phases 1, 2 and 3 each add one to the reservations table.
 1. Deploy Phase 1 (commit `c656253`, which adds `Queue`) and run `migrate-tenancy.mjs`.
-2. Deploy this version (which adds `ByShopCreated`).
+2. Deploy Phase 2 (commit `dc53254`, which adds `ByShopCreated`).
+3. Deploy this version, which adds `ByStudent` and the photo bucket and CDN.
 
-While the new index builds, the counter's numbers panel shows its error state; it recovers on its own.
+While each new index builds, the screens that read it show an error state (the counter's numbers, then passes from the account) and recover on their own. After deploying the marketplace with word search, run `node migrate-search.mjs <MarketplaceTableName>` once so older listings show up in search again.
 
 5. Build the frontend against your API and the marketplace stack's sign-in. Reserving needs sign-in, so the Cognito settings are required.
 
@@ -226,7 +241,7 @@ While the new index builds, the counter's numbers panel shows its error state; i
 cd frontend && npm install && VITE_API_URL=<ApiUrl> VITE_MARKETPLACE_API_URL=<MarketplaceApiUrl> VITE_MARKETPLACE_LOGIN_ORIGIN=<CognitoLoginOrigin> VITE_MARKETPLACE_CLIENT_ID=<CognitoClientId> npm run build
 ```
 
-6. Host it: open the AWS Amplify console, choose **Create new app**, then **Deploy without Git**. Zip the *contents* of `frontend/dist` and drop the zip in. Amplify gives you an `https://…amplifyapp.com` URL. Then open **Hosting → Custom headers**, paste [`frontend/amplify-custom-headers.yml`](frontend/amplify-custom-headers.yml), and replace `API_ORIGIN` with your `ApiUrl` followed by your `MarketplaceApiUrl` and `CognitoLoginOrigin`, separated by spaces. Without the login origin the browser blocks the last step of sign-in. Save, then **upload the same zip again**: Amplify only applies header changes on the next deploy. Check that they're live:
+6. Host it: open the AWS Amplify console, choose **Create new app**, then **Deploy without Git**. Zip the *contents* of `frontend/dist` and drop the zip in. Amplify gives you an `https://…amplifyapp.com` URL. Then open **Hosting → Custom headers**, paste [`frontend/amplify-custom-headers.yml`](frontend/amplify-custom-headers.yml), and replace `API_ORIGIN` with your `ApiUrl` followed by your `MarketplaceApiUrl` and `CognitoLoginOrigin`, separated by spaces. Without the login origin the browser blocks the last step of sign-in. Replace `PHOTO_ORIGIN` with the `PhotoBaseUrl` output, or item photos won't load. Save, then **upload the same zip again**: Amplify only applies header changes on the next deploy. Check that they're live:
 
 ```bash
 curl -sI https://main.<app-id>.amplifyapp.com | grep -iE "content-security-policy|strict-transport-security"
@@ -278,7 +293,8 @@ The three tables are kept on purpose, so a mistaken delete can't wipe reservatio
 ## What's left out on purpose
 - **Not in scope:** online payments, delivery, and more than one campus. Marketplace includes private messages for buyer and seller handover.
 - **Shop Lambda limits:** the shop Lambda has no Redis, so it relies on API Gateway throttles and the per-student hold limit. Marketplace and the combined container also use Redis for application limits.
-- **Still to come:** item photos, the storefront redesign, word search, and billing. See the phases in [DESIGN.md](docs/production/DESIGN.md#11-phases).
+- **Still to come:** billing, metrics and alarms per shop, and merging the two stacks.
+- **Hash links, not paths:** links stay `#…` (for example `#item/campus-shop/item-02`). They are already shareable, and path links would need server rewrites for little gain without server rendering. See the phases in [DESIGN.md](docs/production/DESIGN.md#11-phases).
 
 ## License
 MIT, see [LICENSE](LICENSE).

@@ -6,6 +6,7 @@ import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { makeHandler } from '../src/app.mjs';
 import { initializeLocalTables } from '../src/container-bootstrap.mjs';
 import { migrateToTenancy } from '../src/tenancy-migration.mjs';
+import { memoryPhotos } from '../src/photo-store.mjs';
 
 const dynamoEndpoint = process.env.MARKETPLACE_DYNAMO_ENDPOINT;
 
@@ -33,7 +34,7 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   const { Table } = await client.send(new DescribeTableCommand({ TableName: tables.items }));
   assert.deepEqual(Table.GlobalSecondaryIndexes.map(({ IndexName }) => IndexName), ['ByShop'], 'the older table gained its index');
   const reservationIndexes = (await client.send(new DescribeTableCommand({ TableName: tables.reservations }))).Table.GlobalSecondaryIndexes;
-  assert.deepEqual(reservationIndexes.map(({ IndexName }) => IndexName).sort(), ['ByShopCreated', 'Queue']);
+  assert.deepEqual(reservationIndexes.map(({ IndexName }) => IndexName).sort(), ['ByShopCreated', 'ByStudent', 'Queue']);
   const legacy = { id: randomUUID(), itemId: 'item-02', code: '123456', status: 'HELD', createdAt: '2026-11-27T08:00:00.000Z' };
   await db.send(new PutCommand({ TableName: tables.reservations, Item: legacy }));
   assert.equal((await migrateToTenancy(db, tables, { shopId: 'campus-shop', name: 'Campus shop', holdMinutes: 60 })).reservations, 1);
@@ -41,7 +42,7 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   let clock = Date.parse('2026-11-27T10:00:00Z');
   const handler = makeHandler(db, {
     itemsTable: tables.items, reservationsTable: tables.reservations, tenancyTable: tables.tenancy, shopKey: 'legacy-key-123456',
-    holdMinutes: 60, now: () => new Date(clock), actorFrom: (event) => event.actor,
+    holdMinutes: 60, now: () => new Date(clock), actorFrom: (event) => event.actor, photos: memoryPhotos('https://photos.example'),
   });
   const call = async (routeKey, { as, params, body, query, headers = {} } = {}) => {
     const res = await handler({ routeKey, actor: as, pathParameters: params, queryStringParameters: query, body: body && JSON.stringify(body), headers });
@@ -114,6 +115,18 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   assert.deepEqual(activity.entries.slice(0, 3).map(({ action }) => action), ['joined', 'invite', 'item-updated'], 'newest first');
   // Five holds made above, plus the migrated pilot hold from earlier the same day.
   assert.equal((await call('GET /shops/{shopId}/stats', { as: owner, params: shop, query: { days: '1' } })).body.reservations, 6);
+
+  // Phase 3: shop list, passes across devices through ByStudent, and the photo field.
+  assert.deepEqual((await call('GET /shops')).body.map(({ id: shopId }) => shopId), ['campus-shop']);
+  const passes = (await call('GET /me/reservations', { as: student })).body;
+  assert.equal(passes.length, 5);
+  assert.ok(passes.every((pass, index) => index === 0 || passes[index - 1].createdAt >= pass.createdAt), 'newest first');
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(500, 1)]).toString('base64');
+  const photo = (data) => call('PUT /shops/{shopId}/items/{id}/photo', { as: owner, params: { ...shop, id: 'item-02' }, body: { data } });
+  assert.match((await photo(jpeg)).body.photoUrl, /^https:\/\/photos\.example\/items\/campus-shop\//);
+  assert.ok((await call('GET /items')).body.find(({ id: itemId }) => itemId === 'item-02').photoUrl);
+  assert.equal((await photo(null)).status, 200);
+  assert.equal((await call('GET /items')).body.find(({ id: itemId }) => itemId === 'item-02').photoUrl, undefined);
 
   assert.equal((await call('POST /admin/shops', { as: admin, body: { id: 'second-shop', name: 'Second shop', ownerId: randomUUID() } })).status, 201);
   assert.equal((await call('GET /shops/{shopId}/reservations', { as: owner, params: { shopId: 'second-shop' } })).status, 404);

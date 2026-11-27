@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { getItems, type Item } from './api';
+import { getItems, getShopItems, getShops, type Item, type ShopInfo } from './api';
 import { Student } from './Student';
 import { Marketplace } from './Marketplace';
 import { finishSignIn, isLoginCallback, marketplaceEnabled } from './marketplace-api';
@@ -13,14 +13,17 @@ export type Catalog = {
   error: string;
   refresh: () => Promise<void>;
 };
-
-// Shop staff tools load only when someone opens them, so students never download them.
-const Admin = lazy(() => import('./Admin'));
+// The shops a student can reserve from, and the one they're looking at.
+export type Shops = { list: ShopInfo[]; current?: ShopInfo; choose: (shopId: string) => void };
+const shopKey = 'astrashop.shop';
 
 function currentScreen() {
   if (marketplaceEnabled && /^#marketplace(\/|$)/.test(window.location.hash)) return 'marketplace';
   return /^#(admin(\/|$)|shop$)/.test(window.location.hash) ? 'admin' : 'student';
 }
+
+// Shop staff tools load only when someone opens them, so students never download them.
+const Admin = lazy(() => import('./Admin'));
 
 function App() {
   const [screen, setScreen] = useState(currentScreen);
@@ -29,6 +32,15 @@ function App() {
   const [error, setError] = useState('');
   const [signInError, setSignInError] = useState('');
   const latestRequest = useRef(0);
+  // undefined until loaded; an empty list (an older API, or no shop rows yet) falls back to the pilot catalog.
+  const [shopList, setShopList] = useState<ShopInfo[]>();
+  const [shopId, setShopId] = useState(() => { try { return localStorage.getItem(shopKey) ?? ''; } catch { return ''; } });
+  const currentShop = shopList?.find(({ id }) => id === shopId) ?? shopList?.[0];
+  useEffect(() => { getShops().then(setShopList, () => setShopList([])); }, []);
+  const choose = useCallback((id: string) => {
+    setShopId(id);
+    try { localStorage.setItem(shopKey, id); } catch { /* this visit only */ }
+  }, []);
 
   // Campus sign-in returns here from any screen; finishing it puts back the screen it started on.
   useEffect(() => {
@@ -43,10 +55,11 @@ function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    if (!shopList) return;
     const id = ++latestRequest.current;
     setLoading(true);
     try {
-      const updated = await getItems();
+      const updated = await (currentShop ? getShopItems(currentShop.id) : getItems());
       if (id !== latestRequest.current) return;
       setItems(updated);
       setError('');
@@ -55,11 +68,12 @@ function App() {
     } finally {
       if (id === latestRequest.current) setLoading(false);
     }
-  }, []);
+  }, [shopList, currentShop?.id]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
   const catalog = { items, loading, error, refresh };
+  const shops: Shops = { list: shopList ?? [], current: currentShop, choose };
   return (
     <>
       {/* Moves focus instead of changing the hash, which picks the screen. */}
@@ -84,8 +98,8 @@ function App() {
       </header>
       <main id="main" tabIndex={-1} className="shell content">
         {signInError && <p className="notice error" role="alert">{signInError}</p>}
-        <div hidden={screen !== 'student'}><Student catalog={catalog} active={screen === 'student'} /></div>
-        {screen === 'admin' && <Suspense fallback={<p role="status" className="hint">Loading the shop admin…</p>}><Admin catalog={catalog} /></Suspense>}
+        <div hidden={screen !== 'student'}><Student catalog={catalog} shops={shops} active={screen === 'student'} /></div>
+        {screen === 'admin' && <Suspense fallback={<p role="status" className="hint">Loading the shop admin…</p>}><Admin /></Suspense>}
         {screen === 'marketplace' && <Marketplace />}
       </main>
     </>

@@ -29,6 +29,8 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+    volumes:
+      - photo-data:/data/photos
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -76,3 +78,4 @@ services:
 volumes:
   dynamodb-data:
   redis-data:
+  photo-data:

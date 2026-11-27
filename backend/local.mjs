@@ -9,7 +9,8 @@ import { makeHandler } from './src/app.mjs';
 import { fakeDb } from './fake-db.mjs';
 import { migrateToTenancy } from './src/tenancy-migration.mjs';
 import { seedLocalShop } from './src/container-bootstrap.mjs';
-import { shopRoutes } from './src/http-server.mjs';
+import { bodyLimit, shopRoutes } from './src/http-server.mjs';
+import { memoryPhotos } from './src/photo-store.mjs';
 import { demoIdentities } from './server.mjs';
 import { sampleItems } from './sample-items.mjs';
 import { makeMarketplace } from './src/marketplace.mjs';
@@ -20,8 +21,10 @@ const shopKey = process.env.SHOP_KEY || 'local-shop-key';
 const host = process.env.HOST || '127.0.0.1';
 const holdMinutes = Number(process.env.HOLD_MINUTES) || 1440;
 const db = fakeDb(sampleItems());
+// Photos live in memory and are served below, at the API's own address.
+const photos = memoryPhotos(`http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}/photos`);
 const handler = makeHandler(db, {
-  itemsTable: 'items', reservationsTable: 'reservations', tenancyTable: 'tenancy', shopKey, holdMinutes,
+  itemsTable: 'items', reservationsTable: 'reservations', tenancyTable: 'tenancy', shopKey, holdMinutes, photos,
 });
 // Demo accounts: asha, ravi and neha are students, owner and staff run the demo shop, admin opens shops.
 const identities = demoIdentities();
@@ -102,6 +105,12 @@ http.createServer(async (req, res) => {
   }
   try {
     const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && pathname.startsWith('/photos/')) {
+      const data = await photos.read(pathname.slice('/photos/'.length));
+      if (!data) return localError(res, 404, 'Not found');
+      res.writeHead(200, { ...cors, 'content-type': `image/${pathname.endsWith('.jpg') ? 'jpeg' : pathname.split('.').pop()}`, 'cache-control': photos.cacheControl });
+      return res.end(data);
+    }
     const route = routes.find(({ method, pattern }) => method === req.method && pattern.test(pathname));
     if (!route) return localError(res, 404, 'Not found');
     const values = route.pattern.exec(pathname).slice(1);
@@ -109,7 +118,7 @@ http.createServer(async (req, res) => {
     let size = 0;
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
       size += chunk.length;
-      if (size > 8192) {
+      if (size > bodyLimit(route.routeKey)) {
         req.resume();
         return localError(res, 413, 'Request is too large.');
       }

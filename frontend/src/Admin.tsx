@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
   acceptInvite, createInvite, createItem, createShop, getAudit, getCatalog, getMe, getStaff, inviteLink, listShops,
-  setShopStatus, setStaffRole, updateItem, updateShop,
+  resizePhoto, setShopStatus, setStaffRole, updateItem, updateShop, uploadPhoto,
   type AuditEntry, type Invite, type Item, type Me, type Membership, type Role, type ShopStatus, type ShopSummary, type StaffMember,
 } from './api';
 import { age, until } from './format';
@@ -9,7 +9,6 @@ import { demoIdentity, demoMode, marketRequest, setDemoIdentity, signedIn, signO
 import { listingHref, messageOf, More, Notice, usePage } from './marketplace-ui';
 import { Rupees } from './Rupees';
 import { Shop } from './Shop';
-import type { Catalog } from './main';
 
 type Section = 'counter' | 'catalog' | 'staff' | 'activity' | 'moderation' | 'shops';
 const sectionNames: Record<Section, string> = {
@@ -88,7 +87,32 @@ function InviteLink({ invite }: { invite: Invite }) {
   );
 }
 
-function ItemForm({ item, onDone, shopId }: { item?: Item; shopId: string; onDone: (saved?: Item) => void }) {
+// Uploads as soon as a photo is chosen; the browser shrinks it first, so even a phone camera photo is small.
+function PhotoField({ item, shopId, onSaved }: { item: Item; shopId: string; onSaved: (saved: Item) => void }) {
+  const [state, setState] = useState({ busy: false, error: '' });
+  const save = async (data: () => Promise<string | null>) => {
+    setState({ busy: true, error: '' });
+    try {
+      onSaved(await uploadPhoto(shopId, item.id, await data()));
+      setState({ busy: false, error: '' });
+    } catch (cause) {
+      setState({ busy: false, error: messageOf(cause) });
+    }
+  };
+  return (
+    <div className="photo-field">
+      {item.photoUrl ? <img src={item.photoUrl} alt={`Current photo of ${item.name}`} /> : <p className="hint">No photo yet. Students see the item’s initials instead.</p>}
+      <label className="text-button">{state.busy ? 'Uploading…' : item.photoUrl ? 'Replace photo' : 'Add a photo'}
+        <input type="file" accept="image/*" className="visually-hidden" disabled={state.busy}
+          onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void save(() => resizePhoto(file)); }} />
+      </label>
+      {item.photoUrl && <button type="button" className="text-button" disabled={state.busy} onClick={() => void save(async () => null)}>Remove photo</button>}
+      <Notice error={state.error} />
+    </div>
+  );
+}
+
+function ItemForm({ item, onDone, onPhoto, shopId }: { item?: Item; shopId: string; onDone: (saved?: Item) => void; onPhoto?: (saved: Item) => void }) {
   const [fields, setFields] = useState({
     name: item?.name ?? '', course: item?.course ?? '', price: String(item?.price ?? ''), stock: '0',
     pickupWindow: item?.pickupWindow ?? '', active: item?.active !== false,
@@ -125,6 +149,7 @@ function ItemForm({ item, onDone, shopId }: { item?: Item; shopId: string; onDon
   }
   return (
     <form className="market-form admin-form" onSubmit={(event) => void save(event)}>
+      {item && onPhoto && <PhotoField item={item} shopId={shopId} onSaved={onPhoto} />}
       <label>Name<input className="field-control" required minLength={2} maxLength={80} value={fields.name} onChange={set('name')} /></label>
       <label>Course <small>optional</small><input className="field-control" maxLength={40} value={fields.course} onChange={set('course')} /></label>
       <label>Price in rupees<input className="field-control" required inputMode="numeric" value={fields.price} onChange={set('price')} /></label>
@@ -145,9 +170,10 @@ function CatalogSection({ shop }: { shop: Membership }) {
   const [editing, setEditing] = useState<string>();
   // Use the saved item from the response: on AWS a reload through the catalog index can lag a moment
   // behind the write, which would show a stale version or miss a new item.
+  const put = (saved: Item) => items.update((list = []) => [...list.filter(({ id }) => id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name)));
   const done = (saved?: Item) => {
     setEditing(undefined);
-    if (saved) items.update((list = []) => [...list.filter(({ id }) => id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name)));
+    if (saved) put(saved);
   };
   return (
     <section className="panel" aria-labelledby="catalog-heading">
@@ -162,8 +188,9 @@ function CatalogSection({ shop }: { shop: Membership }) {
       <ul className="admin-list">
         {items.data?.map((item) => (
           <li key={item.id}>
-            {editing === item.id ? <ItemForm item={item} shopId={shop.shopId} onDone={done} /> : (
+            {editing === item.id ? <ItemForm item={item} shopId={shop.shopId} onDone={done} onPhoto={put} /> : (
               <div className="admin-row">
+                {item.photoUrl ? <img className="admin-thumb" src={item.photoUrl} alt="" /> : <span className="admin-thumb is-blank" aria-hidden="true" />}
                 <div>
                   <p className="admin-name">{item.name}{item.active === false && <span className="tag">Off sale</span>}</p>
                   <p className="hint">{[item.course, `${item.stock} on the shelf`, item.pickupWindow].filter(Boolean).join(' · ')}</p>
@@ -442,7 +469,7 @@ function JoinShop({ token, onJoined }: { token: string; onJoined: () => void }) 
   );
 }
 
-export default function Admin({ catalog }: { catalog: Catalog }) {
+export default function Admin() {
   const [route, setRoute] = useState(readRoute);
   const [session, refreshMe] = useSession();
   const me = useLoad<Me | undefined>(signedIn() ? getMe : null, [session]);
@@ -486,7 +513,7 @@ export default function Admin({ catalog }: { catalog: Catalog }) {
           {available.map((name) => <a key={name} href={`#admin/${name}`} aria-current={name === section ? 'page' : undefined}>{sectionNames[name]}</a>)}
         </nav>
       )}
-      {section === 'counter' && <Shop catalog={catalog} shop={shop && { shopId: shop.shopId, name: shop.name }} />}
+      {section === 'counter' && <Shop shop={shop && { shopId: shop.shopId, name: shop.name }} />}
       {section === 'catalog' && shop && <CatalogSection key={shop.shopId} shop={shop} />}
       {section === 'staff' && shop && me.data && <StaffSection key={shop.shopId} shop={shop} me={me.data} onShopChanged={refreshMe} />}
       {section === 'activity' && shop && me.data && <ActivitySection key={shop.shopId} shop={shop} me={me.data} />}

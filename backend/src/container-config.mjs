@@ -40,6 +40,9 @@ export function containerConfig(env = process.env) {
   if (!local && !redisTls) throw new Error('Production Redis requires TLS');
   const allowedOrigin = origin(env.ALLOWED_ORIGIN ?? (local ? 'http://localhost:8080' : ''), 'ALLOWED_ORIGIN', local);
   const loginOrigin = local ? '' : origin(env.COGNITO_LOGIN_ORIGIN, 'COGNITO_LOGIN_ORIGIN', false);
+  // Photos: a volume served by the app locally; an S3 bucket behind a CDN in production (optional).
+  const photos = local ? { dir: env.PHOTO_DIR ?? '/data/photos', baseUrl: '/photos' }
+    : env.PHOTO_BUCKET ? { bucket: setting(env.PHOTO_BUCKET, 'PHOTO_BUCKET'), baseUrl: origin(env.PHOTO_BASE_URL, 'PHOTO_BASE_URL', false) } : undefined;
   const clientId = local ? '' : setting(env.COGNITO_CLIENT_ID, 'COGNITO_CLIENT_ID');
   const poolId = local ? '' : setting(env.COGNITO_USER_POOL_ID, 'COGNITO_USER_POOL_ID');
   const tables = {
@@ -52,7 +55,7 @@ export function containerConfig(env = process.env) {
     if (!/^[\w.-]{3,255}$/.test(value)) throw new Error(`Invalid ${name} table name`);
   }
   return {
-    local, authMode, region, shopKey, defaultShopId, tables, allowedOrigin, loginOrigin, clientId, poolId,
+    local, authMode, region, shopKey, defaultShopId, tables, photos, allowedOrigin, loginOrigin, clientId, poolId,
     port: integer(env.PORT, 8080, 1, 65535, 'PORT'), host: env.HOST ?? '0.0.0.0',
     holdMinutes: integer(env.HOLD_MINUTES, 1440, 1, 525600, 'HOLD_MINUTES'),
     testUsers: local ? integer(env.LOCAL_TEST_USERS, 0, 0, 128, 'LOCAL_TEST_USERS') : 0,

@@ -13,7 +13,10 @@ export const shopRoutes = [
   'GET /shops/{shopId}/catalog', 'POST /shops/{shopId}/items', 'PUT /shops/{shopId}/items/{id}/details', 'PUT /shops/{shopId}',
   'GET /shops/{shopId}/staff', 'POST /shops/{shopId}/invites', 'POST /invites/accept', 'GET /shops/{shopId}/audit',
   'GET /admin/shops', 'PUT /admin/shops/{shopId}',
+  'GET /shops', 'GET /me/reservations', 'PUT /shops/{shopId}/items/{id}/photo',
 ];
+// Photo uploads carry a resized image as base64; every other request stays small.
+export const bodyLimit = (routeKey) => routeKey === 'PUT /shops/{shopId}/items/{id}/photo' ? 1_000_000 : 8192;
 const routes = [
   ...shopRoutes,
   'GET /marketplace/listings', 'POST /marketplace/listings', 'GET /marketplace/mine',
@@ -36,10 +39,13 @@ const routes = [
     pattern: new RegExp(`^${path.replace(/\{\w+\}/g, '([^/]+)')}$`),
   };
 });
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
+const types = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
+  '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+};
 
 export function createHttpServer({ shop, marketplace, verify, readiness = async () => {}, publicDir, publicConfig = {},
-  allowedOrigin, trustProxyHops = 0, production = false, maxActive = 128 }) {
+  allowedOrigin, trustProxyHops = 0, production = false, maxActive = 128, photos }) {
   let active = 0;
   let ready;
   let readyUntil = 0;
@@ -55,10 +61,12 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
     return ready;
   };
   const connect = ["'self'", publicConfig.loginOrigin].filter(Boolean).join(' ');
+  // Photos come from this server locally, or from their CDN in production.
+  const images = ["'self'", 'data:', /^https:\/\//.test(photos?.baseUrl ?? '') ? new URL(photos.baseUrl).origin : ''].filter(Boolean).join(' ');
   const security = {
     'x-content-type-options': 'nosniff', 'referrer-policy': 'strict-origin-when-cross-origin',
     'x-frame-options': 'DENY',
-    'content-security-policy': `default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src ${connect}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    'content-security-policy': `default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src ${images}; connect-src ${connect}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
     ...(production ? { 'strict-transport-security': 'max-age=31536000' } : {}),
   };
   const server = http.createServer({ maxHeaderSize: 16_384 }, async (req, res) => {
@@ -91,6 +99,12 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
         res.writeHead(200, { ...security, 'content-type': types['.js'], 'cache-control': 'no-store' });
         return res.end(`window.__ASTRASHOP_CONFIG__=${JSON.stringify(publicConfig).replace(/</g, '\\u003c')};`);
       }
+      if (pathname.startsWith('/photos/') && photos?.read && ['GET', 'HEAD'].includes(req.method)) {
+        const data = await photos.read(pathname.slice('/photos/'.length));
+        if (!data) return json(404, 'Not found.');
+        res.writeHead(200, { ...security, 'content-type': types[extname(pathname)] ?? 'application/octet-stream', 'cache-control': photos.cacheControl });
+        return res.end(req.method === 'HEAD' ? undefined : data);
+      }
       const matching = routes.filter(({ pattern }) => pattern.test(pathname));
       const route = matching.find(({ method }) => method === req.method);
       if (!route) {
@@ -110,7 +124,20 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
           'cache-control': pathname.startsWith('/assets/') ? 'public,max-age=31536000,immutable' : 'no-cache' });
         return res.end(req.method === 'HEAD' ? undefined : data);
       }
-      if (Number(req.headers['content-length']) > 8192) {
+      const limit = bodyLimit(route.routeKey);
+      // Check the sign-in before reading any body, so an unsigned client can't make the server
+      // buffer a large upload; only signed-in routes accept more than a small body.
+      let claims;
+      if (req.headers.authorization) {
+        try { claims = await verify(req.headers.authorization); }
+        catch (error) {
+          req.resume();
+          if (error.code === 'AUTH_UNAVAILABLE') return json(503, 'Campus sign-in is temporarily unavailable. Try again.', { 'retry-after': '2' });
+          return json(401, 'Sign in again to continue.');
+        }
+      }
+      if (limit > 8192 && !claims) { req.resume(); return json(401, 'Sign in to continue.'); }
+      if (Number(req.headers['content-length']) > limit) {
         req.resume();
         return json(413, 'Request is too large.');
       }
@@ -118,7 +145,7 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
       let size = 0;
       for await (const chunk of req.iterator({ destroyOnReturn: false })) {
         size += chunk.length;
-        if (size > 8192) { req.resume(); return json(413, 'Request is too large.'); }
+        if (size > limit) { req.resume(); return json(413, 'Request is too large.'); }
         chunks.push(chunk);
       }
       // Count only requests doing work: a stalled upload is bounded by requestTimeout and
@@ -139,13 +166,7 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
         body: size ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : undefined,
         requestContext: { http: { sourceIp } },
       };
-      if (req.headers.authorization) {
-        try { event.requestContext.authorizer = { jwt: { claims: await verify(req.headers.authorization) } }; }
-        catch (error) {
-          if (error.code === 'AUTH_UNAVAILABLE') return json(503, 'Campus sign-in is temporarily unavailable. Try again.', { 'retry-after': '2' });
-          return json(401, 'Sign in again to continue.');
-        }
-      }
+      if (claims) event.requestContext.authorizer = { jwt: { claims } };
       const out = await (pathname.startsWith('/marketplace/') ? marketplace : shop)(event);
       if (!res.destroyed) {
         res.writeHead(out.statusCode, { ...security, ...out.headers, ...cors, 'cache-control': 'no-store' });

@@ -156,7 +156,8 @@ test('a rejected refresh clears the session once and preserves an account-bound 
 test('campus sign-in returns to the screen it started on', async () => {
   const sub = '00000000-0000-4000-8000-000000000001';
   const token = 'header.' + Buffer.from(JSON.stringify({ sub })).toString('base64url') + '.signature';
-  for (const [hash, back] of [['', '/'], ['#shop', '/#shop'], ['#marketplace/listing/abc-123', '/#marketplace/listing/abc-123'], ['#evil', '/#marketplace']]) {
+  for (const [hash, back] of [['', '/'], ['#shop', '/#shop'], ['#marketplace/listing/abc-123', '/#marketplace/listing/abc-123'],
+    ['#item/campus-shop/item-02', '/#item/campus-shop/item-02'], ['#item/x/<script>', '/#marketplace'], ['#evil', '/#marketplace']]) {
     const { api, storage, replaced, place } = await client(async () => Response.json({ access_token: token, expires_in: 900 }),
       { production: true, location: { hash } });
     await api.startSignIn();

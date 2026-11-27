@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  ApiError, confirmStock, getCatalog, getMe, getShopReservations, getShopStats, holdAction,
+  ApiError, confirmStock, getCatalog, getItems, getMe, getShopReservations, getShopStats, holdAction,
   type Counter, type HoldAction, type Item, type Me, type Reservation, type ShopStats,
 } from './api';
 import { age, duration, groupCode, until } from './format';
@@ -29,24 +29,25 @@ function storeCounter(counter?: Counter) {
   }
 }
 
-// The app-wide catalog is the pilot shop's. A counter opened with an account shows its own shop's items,
-// including any the owner has taken off sale (they still need counting).
-function useShopItems(shopId?: string): Catalog | undefined {
-  const [state, setState] = useState({ shopId: '', items: [] as Item[], loading: false, error: '' });
+// The counter's own catalog: an account sees every item of its shop, including any taken off sale
+// (they still need counting); the pilot key sees the pilot shop's public catalog.
+function useCounterItems(counter?: Counter): Catalog {
+  const source = !counter ? '' : 'key' in counter ? '#key' : counter.shopId; // '#' never appears in a shop id
+  const [state, setState] = useState({ source: '', items: [] as Item[], loading: false, error: '' });
   const latest = useRef(0);
   const refresh = useCallback(async () => {
-    if (!shopId) return;
+    if (!source) return;
     const request = ++latest.current;
     setState((current) => ({ ...current, loading: true }));
     try {
-      const items = await getCatalog(shopId);
-      if (request === latest.current) setState({ shopId, items, loading: false, error: '' });
+      const items = await (source === '#key' ? getItems() : getCatalog(source));
+      if (request === latest.current) setState({ source, items, loading: false, error: '' });
     } catch (error) {
       if (request === latest.current) setState((current) => ({ ...current, loading: false, error: (error as Error).message }));
     }
-  }, [shopId]);
+  }, [source]);
   useEffect(() => { void refresh(); }, [refresh]);
-  return shopId ? { ...state, items: state.shopId === shopId ? state.items : [], refresh } : undefined;
+  return { ...state, items: state.source === source ? state.items : [], refresh };
 }
 
 // Staff open their shop's counter with their own account; the shops come from GET /me.
@@ -96,9 +97,9 @@ function CounterSignIn({ open, busy }: { open: (counter: Counter) => void; busy:
 }
 
 // `shop` is the shop chosen in the admin console; the counter opens it directly.
-export function Shop({ catalog: pilotCatalog, shop }: { catalog: Catalog; shop?: { shopId: string; name: string } }) {
+export function Shop({ shop }: { shop?: { shopId: string; name: string } }) {
   const [counter, setCounter] = useState(readCounter);
-  const catalog = useShopItems(counter && 'shopId' in counter ? counter.shopId : undefined) ?? pilotCatalog;
+  const catalog = useCounterItems(counter);
   const [entry, setEntry] = useState('');
   const [unlocked, setUnlocked] = useState(false);
   const [held, setHeld] = useState<Reservation[]>([]);

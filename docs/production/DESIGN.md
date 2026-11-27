@@ -1,6 +1,6 @@
 # Astrashop production design
 
-Status: Phases 1 and 2 built, 27 Nov 2026 (see [Phase 1 as built](#13-phase-1-as-built) and [Phase 2 as built](#14-phase-2-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
+Status: Phases 1-3 built, 27 Nov 2026 (see sections [13](#13-phase-1-as-built), [14](#14-phase-2-as-built) and [15](#15-phase-3-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
 
 **Decisions taken**
 - Sell to campus shops: a monthly fee per shop, with a per-reservation fee as an option.
@@ -267,7 +267,7 @@ Each phase ships on its own and keeps CI green.
 |---|---|---|
 | **1. Identity and tenancy** | Tenancy table, `shopId` backfill, indexes (removes the scans), `GET /me`, the `authorize()` role table, staff and owner sign-in with the legacy key behind a flag, sign-in to reserve plus the hold cap, Redis limits on shop routes, audit log, cross-tenant tests.<br>**Local parity**, so the README's "no AWS account needed" stays true and the Docker CI keeps passing: `fake-db.mjs` gains `QueryCommand` on indexes (today it supports Scan, Get, Update and transactions only), `container-bootstrap.mjs` creates the indexes and the Tenancy table, and demo identities gain staff, owner and platform-admin accounts. This is the largest phase, and nothing in it is visible to customers. | Nothing |
 | **2. Admin console** (built) | `/admin` with counter, catalog, staff invites, activity, moderation queue, shop onboarding | Phase 1 |
-| **3. Customer experience** | Item photos (upload in the catalog, S3 + CDN, display on cards), path routes, search-first home, word search, item page, My passes, shop picker, loading and empty states | Phase 1 for My passes and sign-in. The routing, home and cards can start alongside Phase 1 on a separate branch. Expect a small merge in `Student.tsx` and `api.ts`, where Phase 1 adds sign-in to reserve. |
+| **3. Customer experience** (built) | Item photos (upload in the catalog, S3 + CDN, display on cards), path routes, search-first home, word search, item page, My passes, shop picker, loading and empty states | Phase 1 for My passes and sign-in. The routing, home and cards can start alongside Phase 1 on a separate branch. Expect a small merge in `Student.tsx` and `api.ts`, where Phase 1 adds sign-in to reserve. |
 | **4. Money and operations** | Plan and status enforcement, Razorpay webhooks, usage metering, metrics and alarms per shop, stack merge | Phases 1 and 2 |
 
 ## 12. What to revisit as it grows
@@ -357,3 +357,68 @@ Built 27 Nov 2026 on branch `production/phase-2-admin`.
 - An owner created by migration, by `ownerId`, or before Phase 2 has no display name, so the console shows the end of the account id.
 - Pending invites can't be listed or revoked. They expire after 7 days.
 - Reports stay listed after their listing is removed; the console marks them.
+
+## 15. Phase 3 as built
+
+Built 27 Nov 2026 on branch `production/phase-3-storefront`.
+
+**Photos**
+- **Upload:** `PUT /shops/{shopId}/items/{id}/photo` takes base64 JSON. The browser resizes first, to 1200 px and about 100-250 KB. The API checks the file's first bytes for JPEG, PNG or WebP, refuses anything over 600 KB, and names the file `items/<shop>/<sha256>.<ext>`.
+- **Why the upload goes through the API:**
+  - Content checks happen on the server.
+  - No presigning library is needed in the Lambda.
+  - The S3 bucket needs no CORS.
+  - Lambda's 6 MB request limit is far above the size cap.
+- **Storage:**
+  - AWS: a private bucket readable only by CloudFront (origin access control), with the managed security-headers policy so `nosniff` is set.
+  - Docker: the `photo-data` volume, served at `/photos/`.
+  - Lightweight preview: memory.
+- **Served:** item responses carry `photoUrl`. The container's CSP allows the CDN origin in `img-src`. On Amplify, `PHOTO_ORIGIN` must be filled in by hand.
+
+**Storefront** (hash routes kept)
+- A shop picker driven by `GET /shops`.
+- Cards with a 4:3 photo, or a ruled initials label when there is none.
+- An item page at `#item/<shop>/<item>`, with photo and details side by side when the page is wide enough (a container query). On phones the price and Reserve are pinned to the bottom of the screen.
+- "From students" marketplace matches under a search.
+
+**Passes from the account:** `GET /me/reservations` reads the new `ByStudent` index. The pass list merges account holds with this device's pending attempts. Passes saved in the browser are kept per account and reloaded on every sign-in change, so on a shared phone nobody sees another student's pickup codes. This fixes the shared-phone limit from Phase 1.
+
+**Upload safety in the container:** the HTTP server now checks the sign-in token before reading any request body. Only signed-in requests may send more than 8 KB, which caps what an anonymous client can make it buffer. On AWS, API Gateway's authorizer does the same.
+
+**Sign-in from an item page:** sign-in returns to `#item/<shop>/<item>`, so a student who taps Reserve while signed out comes back to the same item.
+
+**Marketplace word search**
+- One `WORD#<kind>` row per distinct word of a title replaces the single whole-title `TITLE#` row. The listing's derived-row set already removes stale words on edit, close or removal.
+- Search walks the rows of the longest word typed and keeps listings whose title has every word typed (as words, or the start of one). A listing that matches through two words is shown once.
+- `backfillListingWords` moves listings stored before word search. It runs on every local container start; on AWS, run `node migrate-search.mjs <table>` once.
+
+**The counter's catalog:** the counter now loads its own items (`/catalog` by account, `/items` by pilot key) instead of borrowing the student page's catalog, which now follows the student's shop choice.
+
+**Verification**
+- 77 backend unit tests and 8 client tests pass. An HTTP test covers the upload sign-in gate, the 1 MB cap, and photo serving with `nosniff` and path checks.
+- A throwaway Docker stack accepted a signed-in upload into the photo volume under the read-only filesystem. It served the photo with year-long caching, kept it across an app restart, and refused an anonymous upload.
+- The integration tests pass on DynamoDB Local. They cover the `ByStudent` query, setting and removing a photo, word search, and the backfill through the real store.
+- The browser check covered:
+  - a 3.6 MB PNG uploaded through the admin file picker became a 25 KB JPEG, served with year-long caching
+  - the photo card and item page at desktop, wide and phone widths, including the pinned Reserve bar
+  - reserving from the item page
+  - a pass restored from the account after this browser's saved passes were wiped
+  - "drafter" showing the shop item and a student listing together
+  - the shop picker with a second shop
+
+**Changes from the plan**
+
+| Planned | Built | Why |
+|---|---|---|
+| Path routes | Hash routes kept | Hash links are already shareable. Paths need SPA rewrites on Amplify and the container, and change every existing link, for little gain without server rendering. |
+| Presigned browser upload to S3 | Upload through the API | Server-side content checks, no presigner dependency in Lambda, no bucket CORS |
+| Course kits | Not built | A separate revenue feature (§7) |
+
+**Upgrade path:** the pilot stack now takes three deploys, Phase 1, then Phase 2, then Phase 3, one reservations index each. After the marketplace deploy, run `migrate-search.mjs`.
+
+**Known limits:**
+- Uploading a new photo leaves the old file in storage, since files are content-named and nothing references them by name. A lifecycle rule or a sweep of unreferenced keys can clear them later.
+- The Lambda takes the S3 client from the Node.js runtime, which bundles its own SDK version. The container image pins `@aws-sdk/client-s3` at 3.1177.0.
+- "From students" shows the first three matches in word order, not ranked by relevance.
+- On a phone already used before this version, the signed-out view still shows passes saved under the old shared key until they expire. Signed-in views are separate.
+- Photo upload has only been tested in desktop Chromium, not on a real phone or in Safari. The Safari path retries the photo read without the orientation option.

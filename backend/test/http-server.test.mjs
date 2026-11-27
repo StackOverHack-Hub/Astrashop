@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import test from 'node:test';
 import { createHttpServer } from '../src/http-server.mjs';
 import { containerConfig } from '../src/container-config.mjs';
+import { memoryPhotos } from '../src/photo-store.mjs';
 
 async function fixture(context, options = {}) {
   const handler = async (event) => ({ statusCode: 200, body: JSON.stringify({ route: event.routeKey, ip: event.requestContext.http.sourceIp, claims: event.requestContext.authorizer?.jwt?.claims }) });
@@ -112,4 +113,28 @@ test('a sign-in provider outage is retryable and does not expire the browser ses
   const response = await call('/api/marketplace/profile', { headers: { authorization: 'Bearer token' } });
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('retry-after'), '2');
+});
+
+test('photo uploads need a valid sign-in before any body is read, and photos are served with their CSP', async (context) => {
+  const photos = memoryPhotos('/photos');
+  const key = `items/campus-shop/${'a'.repeat(64)}.jpg`;
+  await photos.put(key, Buffer.from([0xff, 0xd8, 0xff]));
+  const { call } = await fixture(context, {
+    photos, verify: async (header) => { if (header !== 'Bearer good') throw new Error('Invalid token'); return { sub: 'owner' }; },
+  });
+  const path = '/api/shops/campus-shop/items/item-01/photo';
+  const big = JSON.stringify({ data: 'x'.repeat(50_000) });
+  assert.equal((await call(path, { method: 'PUT', body: big })).status, 401, 'no sign-in, no large body');
+  assert.equal((await call(path, { method: 'PUT', body: big, headers: { authorization: 'Bearer forged' } })).status, 401);
+  const accepted = await call(path, { method: 'PUT', body: big, headers: { authorization: 'Bearer good' } });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual((await accepted.json()).claims, { sub: 'owner' });
+  assert.equal((await call(path, { method: 'PUT', body: 'x'.repeat(1_000_001), headers: { authorization: 'Bearer good' } })).status, 413);
+  const photo = await call(`/photos/${key}`);
+  assert.equal(photo.status, 200);
+  assert.equal(photo.headers.get('content-type'), 'image/jpeg');
+  assert.equal(photo.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+  assert.equal(photo.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal((await call('/photos/../server.mjs')).status, 404);
+  assert.equal((await call(`/photos/items/campus-shop/${'b'.repeat(64)}.jpg`)).status, 404);
 });
