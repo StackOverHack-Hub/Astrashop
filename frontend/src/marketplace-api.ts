@@ -36,7 +36,11 @@ const sessionKey = 'astrashop.marketplace.session';
 const pendingKey = 'astrashop.marketplace.pkce';
 const scope = 'openid astrashop/marketplace';
 type Session = { access: string; expires: number; refresh?: string };
-export type DemoIdentity = '' | 'asha' | 'ravi' | 'neha' | 'moderator';
+// Local demo accounts: three students, a marketplace moderator, and the demo shop's owner and staff.
+const demoAccounts = ['asha', 'ravi', 'neha', 'moderator', 'owner', 'staff'] as const;
+export type DemoIdentity = '' | typeof demoAccounts[number];
+// Where a sign-in may return to: the item list, the counter, or a marketplace page.
+const destinations = /^(#marketplace(\/(listing|seller)\/[a-f0-9-]+)?|#shop|)$/;
 let cached: Session | undefined;
 let refreshInFlight: Promise<Session> | undefined;
 const retryWindows = new Map<string, number>();
@@ -66,7 +70,7 @@ export function signedIn() {
   const saved = stored(sessionKey) as Session | null;
   if (saved && typeof saved.access === 'string' && Number.isFinite(saved.expires) &&
     (saved.expires > Date.now() || typeof saved.refresh === 'string') &&
-    (!demoMode || ['demo-asha', 'demo-ravi', 'demo-neha', 'demo-moderator'].includes(saved.access))) {
+    (!demoMode || demoAccounts.some((name) => saved.access === `demo-${name}`))) {
     cached = saved;
     return true;
   }
@@ -119,7 +123,7 @@ export async function startSignIn() {
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(48)));
   const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
   const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
-  const destination = /^#marketplace\/(listing|seller)\/[a-f0-9-]+$/.test(location.hash) ? location.hash : '#marketplace';
+  const destination = destinations.test(location.hash) ? location.hash : '#marketplace';
   sessionStorage.setItem(pendingKey, JSON.stringify({ verifier, state, destination, expires: Date.now() + 15 * 60_000 }));
   const params = new URLSearchParams({
     client_id: clientId, response_type: 'code', redirect_uri: returnTo, scope, state,
@@ -152,17 +156,14 @@ async function exchange(params: Record<string, string>, fallbackRefresh?: string
 export async function finishSignIn() {
   const params = new URLSearchParams(location.search);
   const pending = stored(pendingKey) as { state?: string; verifier?: string; destination?: string; expires?: number } | null;
-  history.replaceState(null, '', '/#marketplace');
+  const back = pending?.destination;
+  history.replaceState(null, '', `/${typeof back === 'string' && destinations.test(back) ? back : '#marketplace'}`);
   sessionStorage.removeItem(pendingKey);
   const code = params.get('code');
   if (!code || !pending?.verifier || pending.state !== params.get('state') || (pending.expires ?? 0) < Date.now()) {
     throw new Error('Sign-in expired or was cancelled. Try again.');
   }
-  const session = await exchange({ grant_type: 'authorization_code', code, redirect_uri: returnTo, code_verifier: pending.verifier });
-  if (pending.destination && /^#marketplace\/(listing|seller)\/[a-f0-9-]+$/.test(pending.destination)) {
-    history.replaceState(null, '', `/${pending.destination}`);
-  }
-  saveSession(session);
+  saveSession(await exchange({ grant_type: 'authorization_code', code, redirect_uri: returnTo, code_verifier: pending.verifier }));
 }
 
 export async function signOut() {
@@ -184,7 +185,7 @@ export async function signOut() {
   location.assign(`${loginOrigin}/logout?${params}`);
 }
 
-async function accessToken() {
+export async function accessToken() {
   if (!signedIn() || !cached) throw new MarketError(401, 'Sign in to continue.');
   const current = cached;
   if (current.expires > Date.now() + 30_000) return current.access;

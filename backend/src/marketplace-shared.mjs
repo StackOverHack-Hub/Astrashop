@@ -62,4 +62,13 @@ function page(rows, context, present) {
   };
 }
 
-export { uuid, hashId, rankId, pageSize, digest, rank, row, write, details, account, threadKey, RequestError, requireInput, respond, text, cursorAnchor, page };
+// Access-token claims set by API Gateway's JWT authorizer or by the container's verifier.
+function signedInUser(event) {
+  const claims = event?.requestContext?.authorizer?.jwt?.claims;
+  if (!claims || claims.token_use !== 'access' || !uuid.test(claims.sub ?? '')) return;
+  const groups = Array.isArray(claims['cognito:groups']) ? claims['cognito:groups']
+    : String(claims['cognito:groups'] ?? '').replace(/[\[\]"]/g, '').split(/[\s,]+/);
+  return { id: claims.sub, groups };
+}
+
+export { signedInUser, uuid, hashId, rankId, pageSize, digest, rank, row, write, details, account, threadKey, RequestError, requireInput, respond, text, cursorAnchor, page };

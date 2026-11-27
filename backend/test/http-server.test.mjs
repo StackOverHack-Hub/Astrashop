@@ -90,16 +90,20 @@ test('production configuration rejects demo auth, local persistence and unencryp
   assert.equal(containerConfig(local).publicConfig.demoAuth, true);
   const production = {
     APP_ENV: 'production', AWS_REGION: 'ap-south-1', SHOP_KEY: 'a-long-shop-key-for-testing',
-    ITEMS_TABLE: 'items', RESERVATIONS_TABLE: 'reservations', MARKETPLACE_TABLE: 'marketplace',
+    ITEMS_TABLE: 'items', RESERVATIONS_TABLE: 'reservations', MARKETPLACE_TABLE: 'marketplace', TENANCY_TABLE: 'tenancy',
     REDIS_HOST: 'redis.example', ALLOWED_ORIGIN: 'https://shop.example',
     COGNITO_LOGIN_ORIGIN: 'https://login.example', COGNITO_CLIENT_ID: 'client', COGNITO_USER_POOL_ID: 'ap-south-1_pool',
   };
   assert.equal(containerConfig(production).publicConfig.demoAuth, false);
   assert.equal(containerConfig(production).testUsers, 0);
   assert.equal(containerConfig(production).endpoint, undefined);
-  for (const change of [{ AUTH_MODE: 'demo' }, { DYNAMO_ENDPOINT: 'http://dynamodb:8000' }, { REDIS_TLS: 'false' }, { SHOP_KEY: 'short' }, { ALLOWED_ORIGIN: 'http://shop.example' }]) {
+  for (const change of [{ AUTH_MODE: 'demo' }, { DYNAMO_ENDPOINT: 'http://dynamodb:8000' }, { REDIS_TLS: 'false' }, { SHOP_KEY: 'short' },
+    { ALLOWED_ORIGIN: 'http://shop.example' }, { TENANCY_TABLE: undefined }, { DEFAULT_SHOP_ID: 'Not A Shop' }]) {
     assert.throws(() => containerConfig({ ...production, ...change }));
   }
+  // The pilot counter key is optional: without it, staff open the counter only with accounts.
+  const { SHOP_KEY: _key, ...accountsOnly } = production;
+  assert.equal(containerConfig(accountsOnly).shopKey, undefined);
   assert.throws(() => containerConfig({ ...local, LOCAL_TEST_USERS: '999' }));
 });
 

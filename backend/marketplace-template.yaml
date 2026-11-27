@@ -220,6 +220,12 @@ Resources:
     Properties:
       GroupName: MarketplaceModerators
       UserPoolId: !Ref StudentPool
+  # Opens shops and assigns their owners (shop stack: POST /admin/shops).
+  PlatformAdmins:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: PlatformAdmins
+      UserPoolId: !Ref StudentPool
 
   MarketplaceApi:
     Type: AWS::Serverless::HttpApi

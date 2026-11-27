@@ -70,7 +70,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
-      - run: node --test test/marketplace.integration.test.mjs
+      - run: node --test test/marketplace.integration.test.mjs test/shop.integration.test.mjs
         env:
           MARKETPLACE_DYNAMO_ENDPOINT: http://127.0.0.1:8000
           MARKETPLACE_REDIS_URL: redis://127.0.0.1:6379

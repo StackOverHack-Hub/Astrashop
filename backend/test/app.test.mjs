@@ -3,22 +3,27 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { makeHandler } from '../src/app.mjs';
 import { fakeDb } from '../fake-db.mjs';
+import { migrateToTenancy } from '../src/tenancy-migration.mjs';
 
 const SHOP = 'test-shop-key';
 function setup(stock = 1, options) {
   const db = fakeDb([{ id: 'item-1', name: 'Mini drafter', stock }], options);
   let clock = Date.parse('2026-11-26T10:00:00Z');
   const handler = makeHandler(db, {
-    itemsTable: 'items', reservationsTable: 'reservations', shopKey: SHOP, holdMinutes: 60, now: () => new Date(clock),
+    itemsTable: 'items', reservationsTable: 'reservations', tenancyTable: 'tenancy', shopKey: SHOP, holdMinutes: 60,
+    now: () => new Date(clock), actorFrom: (event) => event.actor,
   });
   const advance = (minutes) => { clock += minutes * 60_000; };
   const sweep = () => handler({ source: 'aws.events', 'detail-type': 'Scheduled Event' });
-  const call = async (routeKey, { body, params, shop } = {}) => {
+  // Each reservation id belongs to its own student unless the test says otherwise, so retries of
+  // one id come from the same student and separate holds never reach the per-student limit.
+  const call = async (routeKey, { body, params, shop, as = body?.id && { id: `student-${body.id}` } } = {}) => {
     const res = await handler({
       routeKey,
       body: body && JSON.stringify(body),
       pathParameters: params,
       headers: shop ? { 'x-shop-key': SHOP } : {},
+      actor: as,
     });
     return { status: res.statusCode, body: JSON.parse(res.body) };
   };
@@ -69,11 +74,13 @@ test('expired holds stay on the shop list until marked back on the shelf', async
   assert.equal(stockLeft(), 1, 'marking returned does not restock again');
 });
 
-test('a hold made before expiry existed still expires from its createdAt', async () => {
-  const { call, advance, sweep, stockLeft, db } = setup(1);
+test('a hold made before expiry existed still expires from its createdAt after the migration', async () => {
+  const { advance, sweep, stockLeft, db } = setup(0);
   const id = randomUUID();
-  await call('POST /reservations', { body: { id, itemId: 'item-1' } });
-  delete db.tables.reservations.get(id).expiresAt; // pre-upgrade row
+  // A pre-upgrade row: no shop, no student, no deadline, not in the counter queue.
+  db.tables.reservations.set(id, { id, itemId: 'item-1', code: '123456', status: 'HELD', createdAt: '2026-11-26T10:00:00.000Z' });
+  await migrateToTenancy(db, { items: 'items', reservations: 'reservations', tenancy: 'tenancy' },
+    { shopId: 'campus-shop', name: 'Campus shop', holdMinutes: 60 });
   advance(59);
   assert.deepEqual(await sweep(), counts(0));
   advance(2);
@@ -204,7 +211,7 @@ test('a conflicting release says busy and leaves the hold', async () => {
   assert.equal(stockLeft(), 0);
 });
 
-test('held reservations on later scan pages still reach the shop', async () => {
+test('held reservations on later query pages still reach the shop', async () => {
   const { call } = setup(5, { pageSize: 1 });
   const collected = randomUUID();
   for (const id of [collected, randomUUID(), randomUUID()]) {
@@ -225,7 +232,7 @@ test('the shop confirms a hold is set aside once, then collects it', async () =>
   const { call, advance } = setup(1);
   const id = randomUUID();
   const setAside = () => call('POST /shop/reservations/{id}/set-aside', { params: { id }, shop: true });
-  assert.equal((await setAside()).status, 409, 'an unknown hold is not on hold (same as collect)');
+  assert.equal((await setAside()).status, 404, 'an unknown hold is not found (same as collect)');
   await call('POST /reservations', { body: { id, itemId: 'item-1' } });
   assert.equal((await call('POST /shop/reservations/{id}/set-aside', { params: { id } })).status, 401);
   advance(4);

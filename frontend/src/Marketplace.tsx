@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  categories, conditions, demoIdentity, demoMode, finishSignIn, isLoginCallback, marketplaceAccount, MarketError, marketRequest, readListingDraft, storeListingDraft, setDemoIdentity,
+  categories, conditions, demoIdentity, demoMode, marketplaceAccount, MarketError, marketRequest, readListingDraft, storeListingDraft, setDemoIdentity,
   signedIn, signOut, startSignIn, type DemoIdentity, type Kind,
   type Listing, type Condition, type ListingInput, type Message, type OwnedListing, type OwnProfile, type SavedEntry, type Thread,
 } from './marketplace-api';
@@ -516,14 +516,12 @@ export function Marketplace() {
   const [member, setMember] = useState(signedIn);
   const [demo, setDemo] = useState(demoIdentity);
   const [error, setError] = useState('');
-  const [authenticating, setAuthenticating] = useState(isLoginCallback);
+  const [authenticating, setAuthenticating] = useState(false);
   useEffect(() => {
-    if (!authenticating) return;
-    void finishSignIn().then(() => setMember(true))
-      .catch((cause) => setError(messageOf(cause))).finally(() => setAuthenticating(false));
-  }, []);
-  useEffect(() => {
-    const sync = () => setMember(signedIn());
+    const sync = () => {
+      setMember(signedIn());
+      setDemo(demoIdentity());
+    };
     const expired = () => setError('Your session ended. Sign in again to continue. Your listing draft is saved in this browser tab.');
     window.addEventListener('marketplace-session-change', sync);
     window.addEventListener('marketplace-auth-expired', expired);
@@ -561,6 +559,7 @@ export function Marketplace() {
             setMember(Boolean(identity));
           }}>
             <option value="">Guest</option><option value="asha">Asha</option><option value="ravi">Ravi</option><option value="neha">Neha</option>
+            <option value="owner">Shop owner</option><option value="staff">Shop staff</option>
           </select></label>
         ) : <button type="button" className="text-button" disabled={authenticating}
           onClick={member && signedIn() ? logout : login}>{authenticating ? 'Please wait…' : member && signedIn() ? 'Sign out' : 'Campus sign-in'}</button>}

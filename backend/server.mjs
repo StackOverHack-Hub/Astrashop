@@ -8,15 +8,18 @@ import { makeMarketplace } from './src/marketplace.mjs';
 import { dynamoMarketplace } from './src/marketplace-store.mjs';
 import { redisLimiter } from './src/marketplace-limit.mjs';
 import { containerConfig } from './src/container-config.mjs';
-import { initializeLocalTables, seedLocalMarketplace } from './src/container-bootstrap.mjs';
+import { initializeLocalTables, seedLocalMarketplace, seedLocalShop } from './src/container-bootstrap.mjs';
+import { migrateToTenancy } from './src/tenancy-migration.mjs';
 import { createHttpServer } from './src/http-server.mjs';
 import { digest } from './src/marketplace-shared.mjs';
 
+const demoGroups = { moderator: ['MarketplaceModerators'], admin: ['PlatformAdmins'] };
+
 export function demoIdentities(count = 0) {
-  const identities = new Map(['asha', 'ravi', 'neha', 'moderator'].map((name, index) => [
+  const identities = new Map(['asha', 'ravi', 'neha', 'moderator', 'owner', 'staff', 'admin'].map((name, index) => [
     `Bearer demo-${name}`, {
       sub: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`, token_use: 'access',
-      'cognito:groups': name === 'moderator' ? ['MarketplaceModerators'] : [],
+      'cognito:groups': demoGroups[name] ?? [],
     },
   ]));
   for (let index = 0; index < count; index++) identities.set(`Bearer demo-stress-${index}`, {
@@ -37,16 +40,20 @@ export async function startContainer(env = process.env) {
   const store = dynamoMarketplace(db, config.tables.marketplace);
   const marketplace = makeMarketplace(store, limit);
   const shopHandler = makeHandler(db, {
-    itemsTable: config.tables.items, reservationsTable: config.tables.reservations,
-    shopKey: config.shopKey, holdMinutes: config.holdMinutes,
+    itemsTable: config.tables.items, reservationsTable: config.tables.reservations, tenancyTable: config.tables.tenancy,
+    shopKey: config.shopKey, defaultShopId: config.defaultShopId, holdMinutes: config.holdMinutes,
   });
   const shop = async (event) => {
     if (event.source === 'aws.events') return shopHandler(event);
     let wait;
     try {
       const write = !event.routeKey.startsWith('GET ');
-      wait = await limit(`shop-${write ? 'write' : 'read'}:${digest(event.requestContext.http.sourceIp)}`,
-        { capacity: write ? 60 : 600, windowMs: 60_000 });
+      const buckets = [[`shop-${write ? 'write' : 'read'}:${digest(event.requestContext.http.sourceIp)}`,
+        { capacity: write ? 60 : 600, windowMs: 60_000 }]];
+      // Per account as well as per network: the hold limit caps hoarding, this caps hammering.
+      const student = event.requestContext.authorizer?.jwt?.claims?.sub;
+      if (event.routeKey === 'POST /reservations' && student) buckets.push([`reserve:${digest(student)}`, { capacity: 20, windowMs: 600_000 }]);
+      for (const [key, policy] of buckets) if ((wait = await limit(key, policy))) break;
     } catch { return { statusCode: 503, headers: { 'content-type': 'application/json', 'retry-after': '2' }, body: JSON.stringify({ error: 'Shop is temporarily busy. Try again.' }) }; }
     if (wait) return { statusCode: 429, headers: { 'content-type': 'application/json', 'retry-after': String(wait) }, body: JSON.stringify({ error: 'Too many requests. Try again shortly.' }) };
     return shopHandler(event);
@@ -54,6 +61,10 @@ export async function startContainer(env = process.env) {
   const identities = demoIdentities(config.testUsers);
   if (config.local) {
     await initializeLocalTables(client, db, config.tables);
+    await migrateToTenancy(db, config.tables, {
+      shopId: config.defaultShopId, name: 'Campus stationery shop', pickupWindow: 'Mon–Sat, 10 am–6 pm', holdMinutes: config.holdMinutes,
+    });
+    await seedLocalShop(shopHandler, identities, config.defaultShopId);
     await seedLocalMarketplace(makeMarketplace(store, async () => 0), identities);
   }
   const verify = tokenVerifier(config, identities);
@@ -61,6 +72,7 @@ export async function startContainer(env = process.env) {
     await Promise.all([
       limit.health(), store.get('_health', '_health'),
       ...[config.tables.items, config.tables.reservations].map((TableName) => db.send(new GetCommand({ TableName, Key: { id: '_health' } }))),
+      db.send(new GetCommand({ TableName: config.tables.tenancy, Key: { pk: '_health', sk: '_health' } })),
     ]);
   };
   const server = createHttpServer({

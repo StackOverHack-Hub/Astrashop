@@ -202,7 +202,10 @@ test('authorizer claims reject ID tokens and the signup trigger gates the exact 
   assert.deepEqual(await signup(request('Student@ADYPU.edu.in')), request('Student@ADYPU.edu.in'));
   for (const email of ['student@notadypu.edu.in', 'student@adypu.edu.in.evil.invalid', 'adypu.edu.in', 'a@b@adypu.edu.in']) {
     await assert.rejects(signup(request(email)));
+    await assert.rejects(signup({ ...request(email), triggerSource: 'PreSignUp_SignUp' }));
   }
+  const shopkeeper = { triggerSource: 'PreSignUp_AdminCreateUser', request: { userAttributes: { email: 'owner@stationery.example' } } };
+  assert.deepEqual(await signup(shopkeeper), shopkeeper, 'admins can create shop staff accounts without a campus email');
 });
 
 const publicProfile = (call, actor, name, extra = {}) =>

@@ -3,10 +3,16 @@ import { isIP } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
 
-const routes = [
-  'GET /items', 'POST /reservations', 'GET /reservations/{id}',
+export const shopRoutes = [
+  'GET /items', 'POST /reservations', 'GET /reservations/{id}', 'GET /me',
   'GET /shop/reservations', 'PUT /shop/items/{id}', 'GET /shop/stats',
   ...['collect', 'release', 'returned', 'set-aside'].map((action) => `POST /shop/reservations/{id}/${action}`),
+  'GET /shops/{shopId}/items', 'GET /shops/{shopId}/reservations', 'PUT /shops/{shopId}/items/{id}', 'GET /shops/{shopId}/stats',
+  ...['collect', 'release', 'returned', 'set-aside'].map((action) => `POST /shops/{shopId}/reservations/{id}/${action}`),
+  'PUT /shops/{shopId}/staff/{userId}', 'POST /admin/shops',
+];
+const routes = [
+  ...shopRoutes,
   'GET /marketplace/listings', 'POST /marketplace/listings', 'GET /marketplace/mine',
   'GET /marketplace/listings/{id}', 'PUT /marketplace/listings/{id}',
   'POST /marketplace/listings/{id}/contact', 'POST /marketplace/listings/{id}/report',
@@ -130,7 +136,7 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
         body: size ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : undefined,
         requestContext: { http: { sourceIp } },
       };
-      if (pathname.startsWith('/marketplace/') && req.headers.authorization) {
+      if (req.headers.authorization) {
         try { event.requestContext.authorizer = { jwt: { claims: await verify(req.headers.authorization) } }; }
         catch (error) {
           if (error.code === 'AUTH_UNAVAILABLE') return json(503, 'Campus sign-in is temporarily unavailable. Try again.', { 'retry-after': '2' });

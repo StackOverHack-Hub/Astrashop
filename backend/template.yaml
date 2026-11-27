@@ -1,14 +1,29 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Astrashop - find, reserve and pick up an item from one campus shop
+Description: Astrashop - find, reserve and pick up items from campus shops
 
 # One template per environment: deploy it as two stacks (e.g. astrashop-dev, astrashop-prod).
 Parameters:
   ShopKey:
     Type: String
     NoEcho: true
-    MinLength: 16
-    Description: Shared secret the shopkeeper types into the shop screen. Generate with `openssl rand -base64 24`.
+    Default: ''
+    AllowedPattern: '^(|.{16,})$'
+    ConstraintDescription: must be empty or at least 16 characters
+    Description: Optional pilot counter key for the default shop only. Leave empty once its staff sign in with accounts.
+  UserPoolId:
+    Type: String
+    AllowedPattern: '^[\w-]+_[0-9a-zA-Z]+$'
+    Description: The StudentPool id from the marketplace stack. Students, staff and admins all sign in there.
+  UserPoolClientId:
+    Type: String
+    AllowedPattern: '^[0-9a-z]+$'
+    Description: The StudentClient id from the marketplace stack.
+  DefaultShopId:
+    Type: String
+    Default: campus-shop
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$'
+    Description: The shop that owns data from before shops existed, and the one the pilot routes and counter key open.
   AllowedOrigin:
     Type: String
     Default: '*'
@@ -43,13 +58,24 @@ Resources:
     Properties:
       CorsConfiguration:
         AllowOrigins: [!Ref AllowedOrigin]
-        AllowHeaders: [content-type, x-shop-key]
+        AllowHeaders: [authorization, content-type, x-shop-key]
         AllowMethods: [GET, POST, PUT, OPTIONS]
         MaxAge: 600
-      # Caps total traffic so a script can't run up the bill or drain stock in seconds.
+      # Caps total traffic so a script can't run up the bill. Sized for about 50 shops at the start
+      # of term; the per-student hold limit is what stops one person draining a shelf.
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 50
-        ThrottlingRateLimit: 25
+        ThrottlingBurstLimit: 400
+        ThrottlingRateLimit: 200
+      # Routes sign in by default. Public routes, and the pilot routes guarded by the counter key, opt out.
+      Auth:
+        DefaultAuthorizer: Campus
+        Authorizers:
+          Campus:
+            IdentitySource: '$request.header.Authorization'
+            AuthorizationScopes: [astrashop/marketplace]
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}
+              audience: [!Ref UserPoolClientId]
       AccessLogSettings:
         DestinationArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiAccessLogs}
         Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","route":"$context.routeKey","status":"$context.status","latencyMs":"$context.responseLatency","time":"$context.requestTime"}'
@@ -64,14 +90,23 @@ Resources:
     Properties:
       RetentionInDays: 30
 
+  # Keys and indexes match backend/src/schema.mjs. CloudFormation adds one index per table per
+  # deploy, so add any later index in its own deploy. Indexes project whole rows: the sweep needs them.
   ItemsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      AttributeDefinitions:
+        - { AttributeName: id, AttributeType: S }
+        - { AttributeName: shopId, AttributeType: S }
+        - { AttributeName: name, AttributeType: S }
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      GlobalSecondaryIndexes:
+        - IndexName: ByShop
+          KeySchema: [{ AttributeName: shopId, KeyType: HASH }, { AttributeName: name, KeyType: RANGE }]
+          Projection: { ProjectionType: ALL }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
   ReservationsTable:
@@ -80,8 +115,30 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      AttributeDefinitions:
+        - { AttributeName: id, AttributeType: S }
+        - { AttributeName: queueShop, AttributeType: S }
+        - { AttributeName: expiresAt, AttributeType: S }
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      # queueShop exists only while a hold needs the counter, so this index stays small.
+      GlobalSecondaryIndexes:
+        - IndexName: Queue
+          KeySchema: [{ AttributeName: queueShop, KeyType: HASH }, { AttributeName: expiresAt, KeyType: RANGE }]
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # Shops, staff, per-student hold counts and the staff audit log (expires after a year).
+  TenancyTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema: [{ AttributeName: pk, KeyType: HASH }, { AttributeName: sk, KeyType: RANGE }]
+      TimeToLiveSpecification: { AttributeName: expires, Enabled: true }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
   ApiFunction:
@@ -98,25 +155,46 @@ Resources:
         Variables:
           ITEMS_TABLE: !Ref ItemsTable
           RESERVATIONS_TABLE: !Ref ReservationsTable
+          TENANCY_TABLE: !Ref TenancyTable
           SHOP_KEY: !Ref ShopKey
+          DEFAULT_SHOP_ID: !Ref DefaultShopId
           HOLD_MINUTES: !Ref HoldMinutes
-      # Only the four actions the code uses; transactions authorize as their Put/Update parts.
+      # Only the actions the code uses; transactions authorize as their parts.
       Policies:
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Scan]
-              Resource: [!GetAtt ItemsTable.Arn, !GetAtt ReservationsTable.Arn]
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem, dynamodb:Scan, dynamodb:Query]
+              Resource:
+                - !GetAtt ItemsTable.Arn
+                - !GetAtt ReservationsTable.Arn
+                - !GetAtt TenancyTable.Arn
+                - !Sub '${ItemsTable.Arn}/index/*'
+                - !Sub '${ReservationsTable.Arn}/index/*'
       Events:
-        ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET } }
+        # Open to anyone: browsing, and a pickup pass read by its secret reservation id.
+        ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET, Auth: { Authorizer: NONE } } }
+        ShopItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items', Method: GET, Auth: { Authorizer: NONE } } }
+        GetReservation: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/reservations/{id}', Method: GET, Auth: { Authorizer: NONE } } }
+        # Signed in; the function checks the shop role for each request.
+        Me: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /me, Method: GET } }
         Reserve: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /reservations, Method: POST } }
-        GetReservation: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/reservations/{id}', Method: GET } }
-        ShopHeld: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/reservations, Method: GET } }
-        ShopStock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/items/{id}', Method: PUT } }
-        ShopCollect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/collect', Method: POST } }
-        ShopRelease: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/release', Method: POST } }
-        ShopReturned: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/returned', Method: POST } }
-        ShopSetAside: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/set-aside', Method: POST } }
-        ShopStats: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/stats, Method: GET } }
+        Queue: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations', Method: GET } }
+        Stats: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/stats', Method: GET } }
+        Stock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items/{id}', Method: PUT } }
+        Collect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations/{id}/collect', Method: POST } }
+        Release: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations/{id}/release', Method: POST } }
+        Returned: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations/{id}/returned', Method: POST } }
+        SetAside: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations/{id}/set-aside', Method: POST } }
+        Staff: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/staff/{userId}', Method: PUT } }
+        CreateShop: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /admin/shops, Method: POST } }
+        # Pilot routes for the default shop, guarded by the counter key inside the function.
+        ShopHeld: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/reservations, Method: GET, Auth: { Authorizer: NONE } } }
+        ShopStock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/items/{id}', Method: PUT, Auth: { Authorizer: NONE } } }
+        ShopCollect: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/collect', Method: POST, Auth: { Authorizer: NONE } } }
+        ShopRelease: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/release', Method: POST, Auth: { Authorizer: NONE } } }
+        ShopReturned: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/returned', Method: POST, Auth: { Authorizer: NONE } } }
+        ShopSetAside: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/reservations/{id}/set-aside', Method: POST, Auth: { Authorizer: NONE } } }
+        ShopStats: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/stats, Method: GET, Auth: { Authorizer: NONE } } }
         ExpireHolds: { Type: Schedule, Properties: { Schedule: rate(10 minutes) } }
 
   AlertTopic:
@@ -166,3 +244,5 @@ Outputs:
     Value: !Ref ItemsTable
   ReservationsTableName:
     Value: !Ref ReservationsTable
+  TenancyTableName:
+    Value: !Ref TenancyTable

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ApiError, getReservation, reserveItem, type Item, type Reservation } from './api';
 import { age, availability, groupCode, until } from './format';
 import { Rupees } from './Rupees';
+import { demoMode, setDemoIdentity, signedIn, startSignIn, type DemoIdentity } from './marketplace-api';
 import type { Catalog } from './main';
 
 type Attempt = {
@@ -30,6 +31,29 @@ function restoreAttempts(): Attempt[] {
   }
 }
 
+// Shown when a signed-out student taps Reserve: holds belong to an account so one person can't hold a whole shelf.
+function SignInPrompt() {
+  const [error, setError] = useState('');
+  return (
+    <div className="notice sign-in-prompt" role="status">
+      <p>Sign in with your campus account to reserve. You can hold up to three items at a time at each shop.</p>
+      {demoMode ? (
+        <label>Local demo student
+          <select className="field-control" defaultValue="" onChange={(event) => setDemoIdentity(event.target.value as DemoIdentity)}>
+            <option value="" disabled>Choose an account</option>
+            <option value="asha">Asha</option><option value="ravi">Ravi</option><option value="neha">Neha</option>
+          </select>
+        </label>
+      ) : (
+        <button type="button" className="reserve" onClick={() => void startSignIn().catch((cause: Error) => setError(cause.message))}>
+          Campus sign-in
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
 export function Student({ catalog, active }: { catalog: Catalog; active: boolean }) {
   const [query, setQuery] = useState('');
   const [course, setCourse] = useState<string>();
@@ -42,6 +66,13 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   const [notice, setNotice] = useState('');
   const [reserveError, setReserveError] = useState('');
   const [refreshError, setRefreshError] = useState('');
+  const [needSignIn, setNeedSignIn] = useState(false);
+
+  useEffect(() => {
+    const sync = () => { if (signedIn()) setNeedSignIn(false); };
+    window.addEventListener('marketplace-session-change', sync);
+    return () => window.removeEventListener('marketplace-session-change', sync);
+  }, []);
 
   function save(next: Attempt[]) {
     saved.current = next;
@@ -97,6 +128,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
     if (submitting.current) return;
     setReserveError('');
     setNotice('');
+    if (!signedIn()) {
+      setNeedSignIn(true);
+      return;
+    }
     let attempt = saved.current.find((entry) => entry.itemId === item.id && !entry.reservation);
     if (!attempt) {
       if (!window.crypto?.randomUUID) {
@@ -124,8 +159,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       if (error instanceof ApiError && error.status < 500 && error.status !== 429) {
         const id = attempt.id;
         save(saved.current.filter((entry) => entry.id !== id || entry.reservation));
-        setReserveError(error.status === 409 ? 'Just sold out' : error.message);
-        if (error.status === 409) void catalog.refresh();
+        if (error.status === 401) setNeedSignIn(true);
+        const soldOut = error.status === 409 && error.code !== 'HOLD_LIMIT';
+        setReserveError(soldOut ? 'Just sold out' : error.message);
+        if (soldOut) void catalog.refresh();
       } else {
         setReserveError('Reservation confirmation is pending. Retry it from My reservations.');
       }
@@ -164,6 +201,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       {/* The new pass is the visible confirmation; announce it without shifting the page. */}
       <p className="visually-hidden" role="status">{notice}</p>
       {reserveError && <p className="notice error" role="alert">{reserveError}</p>}
+      {needSignIn && <SignInPrompt />}
 
       <div className={filtering ? 'student-layout is-filtering' : 'student-layout'}>
         <section className="sheet sheet-ruled" aria-label="Campus shop items">

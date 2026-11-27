@@ -2,7 +2,7 @@ import { marketplaceCommunity, profileId, publicSellerRoutes } from './marketpla
 import { dependencyUnavailable } from './dependency-errors.mjs';
 import {
   uuid, hashId, rankId, pageSize, digest, rank, row, write, details, account, threadKey,
-  RequestError, requireInput, respond, text, cursorAnchor, page,
+  RequestError, requireInput, respond, text, cursorAnchor, page, signedInUser,
 } from './marketplace-shared.mjs';
 
 export const kinds = ['item', 'service', 'favor'];
@@ -111,11 +111,8 @@ const temporary = new Set([
 ]);
 
 export function gatewayActor(event) {
-  const claims = event.requestContext?.authorizer?.jwt?.claims;
-  if (!claims || claims.token_use !== 'access' || !uuid.test(claims.sub ?? '')) return;
-  const groups = Array.isArray(claims['cognito:groups']) ? claims['cognito:groups']
-    : String(claims['cognito:groups'] ?? '').replace(/[\[\]"]/g, '').split(/[\s,]+/);
-  return { id: claims.sub, moderator: groups.includes('MarketplaceModerators') };
+  const user = signedInUser(event);
+  return user && { id: user.id, moderator: user.groups.includes('MarketplaceModerators') };
 }
 
 export function makeMarketplace(store, limit, { actorFrom = gatewayActor, now = () => new Date() } = {}) {

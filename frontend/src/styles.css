@@ -473,3 +473,12 @@ textarea.field-control { resize: vertical; }
   .market-filters button { flex: 1 1 auto; padding-inline: .3rem; font-size: .75rem; white-space: nowrap; }
   .market-heading label { width: 100%; grid-template-columns: minmax(0, 1fr) 8rem; align-items: center; gap: .75rem; font-size: .8rem; }
 }
+
+/* Sign-in asked for at the moment it is needed (reserving, opening the counter). */
+.sign-in-prompt { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1.1rem; border-color: var(--blue); }
+.sign-in-prompt p { flex: 1 1 18rem; }
+.sign-in-prompt label { display: flex; align-items: center; gap: .6rem; font-weight: 600; }
+.sign-in-prompt .error { flex-basis: 100%; }
+.counter-sign-in { display: grid; gap: .9rem; max-width: 26rem; margin-bottom: var(--section-gap); }
+.counter-sign-in h2 { font-size: 1.15rem; }
+.counter-shops { display: flex; flex-wrap: wrap; gap: .6rem; }

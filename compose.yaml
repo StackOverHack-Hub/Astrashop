@@ -15,6 +15,7 @@ services:
       ITEMS_TABLE: ${ITEMS_TABLE:-astrashop-items}
       RESERVATIONS_TABLE: ${RESERVATIONS_TABLE:-astrashop-reservations}
       MARKETPLACE_TABLE: ${MARKETPLACE_TABLE:-astrashop-marketplace}
+      TENANCY_TABLE: ${TENANCY_TABLE:-astrashop-tenancy}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_CLUSTER: "false"

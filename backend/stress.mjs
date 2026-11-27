@@ -89,14 +89,18 @@ async function flow(index) {
 
 async function shopFlow() {
   const headers = { 'x-shop-key': process.env.STRESS_SHOP_KEY ?? 'local-shop-key' };
-  const results = await Promise.all(Array.from({ length: 16 }, () => call('/reservations', {
-    method: 'POST', body: { id: randomUUID(), itemId: 'item-08' }, expected: [201, 409],
+  // Reserving needs a signed-in student: 16 students race for the last unit.
+  const racers = Array.from({ length: 16 }, (_, n) => attacker(n));
+  const results = await Promise.all(racers.map((actor) => call('/reservations', {
+    actor, method: 'POST', body: { id: randomUUID(), itemId: 'item-08' }, expected: [201, 409],
   })));
   const winners = results.filter(({ status }) => status === 201);
   assert.equal(winners.length, 1);
   const hold = winners[0].body;
+  const winner = racers[results.indexOf(winners[0])];
+  await call('/reservations', { method: 'POST', body: { id: randomUUID(), itemId: 'item-08' }, expected: [401] });
   await Promise.all(Array.from({ length: 4 }, () => call('/reservations', {
-    method: 'POST', body: { id: hold.id, itemId: hold.itemId }, expected: [200],
+    actor: winner, method: 'POST', body: { id: hold.id, itemId: hold.itemId }, expected: [200],
   })));
   assert.match(hold.code, /^\d{6}$/);
   assert.equal((await call('/items')).body.find(({ id }) => id === 'item-08').stock, 0);
@@ -109,7 +113,7 @@ async function shopFlow() {
   await call(`/shop/reservations/${hold.id}/release`, { method: 'POST', headers, expected: [409] });
   const releaseId = randomUUID();
   const before = (await call('/items')).body.find(({ id }) => id === 'item-01').stock;
-  await call('/reservations', { method: 'POST', body: { id: releaseId, itemId: 'item-01' }, expected: [201] });
+  await call('/reservations', { actor: 60, method: 'POST', body: { id: releaseId, itemId: 'item-01' }, expected: [201] });
   await Promise.all(Array.from({ length: 3 }, () => call(`/shop/reservations/${releaseId}/release`, {
     method: 'POST', headers, expected: [200, 409],
   })));
@@ -292,7 +296,7 @@ async function counterClicks() {
   const stock = async (id) => (await call('/items')).body.find((item) => item.id === id).stock;
   const before = await stock('item-06');
   const hold = { id: randomUUID(), itemId: 'item-06' };
-  const reserves = await burst(10, () => call('/reservations', { method: 'POST', body: hold, expected: [200, 201] }));
+  const reserves = await burst(10, () => call('/reservations', { actor: 61, method: 'POST', body: hold, expected: [200, 201] }));
   assert.equal(count(reserves, 201), 1);
   assert.equal(await stock('item-06'), before - 1, 'reserve x10 took more than one unit');
   await burst(10, () => call(`/shop/reservations/${hold.id}/set-aside`, { method: 'POST', headers }));
@@ -300,7 +304,7 @@ async function counterClicks() {
   assert.equal(count(collects, 200), 1);
   // Collected and Release pressed together: exactly one wins and stock agrees.
   const second = { id: randomUUID(), itemId: 'item-06' };
-  await call('/reservations', { method: 'POST', body: second, expected: [201] });
+  await call('/reservations', { actor: 63, method: 'POST', body: second, expected: [201] });
   const mixed = await burst(10, (i) => call(`/shop/reservations/${second.id}/${i % 2 ? 'collect' : 'release'}`, { method: 'POST', headers, expected: [200, 409] }));
   assert.equal(count(mixed, 200), 1, 'collect and release both succeeded');
   const released = (await call(`/reservations/${second.id}`)).body.status === 'RELEASED';
@@ -381,7 +385,7 @@ async function fuzz() {
   // Shop inputs.
   const headers = { 'x-shop-key': process.env.STRESS_SHOP_KEY ?? 'local-shop-key' };
   for (const body of [{ id: randomUUID(), itemId: 123 }, { id: randomUUID(), itemId: 'x'.repeat(200) }, { itemId: 'item-02' }, { id: 'nope', itemId: 'item-02' }]) {
-    await call('/reservations', { method: 'POST', body, expected: [400] });
+    await call('/reservations', { actor: 63, method: 'POST', body, expected: [400] });
   }
   for (const body of [{ stock: '5', expectedStock: 5 }, { stock: 5.5, expectedStock: 5 }, { stock: 100001, expectedStock: 5 }, { stock: 5 }]) {
     await call('/shop/items/item-02', { method: 'PUT', headers, body, expected: [400] });
@@ -422,7 +426,7 @@ try {
   // Transport and validation checks precede load. No malformed request may yield 500.
   for (const raw of ['{', 'null', '[]', '"text"', '42']) {
     await call('/marketplace/profile', { actor: 62, method: 'PUT', raw, expected: [400] });
-    await call('/reservations', { method: 'POST', raw, expected: [400] });
+    await call('/reservations', { actor: 63, method: 'POST', raw, expected: [400] });
   }
   await call('/marketplace/listings', { actor: 62, method: 'POST', body: { id: randomUUID(), kind: 'item', title: 'Invalid', description: 'Invalid amount', meetup: 'Library', pricePaise: -1 }, expected: [400] });
   await call('/marketplace/profile', { actor: 62, method: 'PUT', raw: 'x'.repeat(8193), expected: [413] });

@@ -4,7 +4,7 @@ import { getItems, type Item } from './api';
 import { Shop } from './Shop';
 import { Student } from './Student';
 import { Marketplace } from './Marketplace';
-import { isLoginCallback, marketplaceEnabled } from './marketplace-api';
+import { finishSignIn, isLoginCallback, marketplaceEnabled } from './marketplace-api';
 import '@fontsource-variable/bricolage-grotesque/opsz.css';
 import './styles.css';
 
@@ -16,7 +16,7 @@ export type Catalog = {
 };
 
 function currentScreen() {
-  if (marketplaceEnabled && (/^#marketplace(\/|$)/.test(window.location.hash) || isLoginCallback())) return 'marketplace';
+  if (marketplaceEnabled && /^#marketplace(\/|$)/.test(window.location.hash)) return 'marketplace';
   return window.location.hash === '#shop' ? 'shop' : 'student';
 }
 
@@ -25,7 +25,14 @@ function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [signInError, setSignInError] = useState('');
   const latestRequest = useRef(0);
+
+  // Campus sign-in returns here from any screen; finishing it puts back the screen it started on.
+  useEffect(() => {
+    if (!isLoginCallback()) return;
+    void finishSignIn().catch((cause: Error) => setSignInError(cause.message)).finally(() => setScreen(currentScreen()));
+  }, []);
 
   useEffect(() => {
     const syncScreen = () => setScreen(currentScreen());
@@ -74,6 +81,7 @@ function App() {
         </nav>
       </header>
       <main id="main" tabIndex={-1} className="shell content">
+        {signInError && <p className="notice error" role="alert">{signInError}</p>}
         <div hidden={screen !== 'student'}><Student catalog={catalog} active={screen === 'student'} /></div>
         {screen === 'shop' && <Shop catalog={catalog} />}
         {screen === 'marketplace' && <Marketplace />}

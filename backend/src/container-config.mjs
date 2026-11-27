@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { SHOP_ID } from './app.mjs';
 
 const bool = (value, fallback = false) => value === undefined ? fallback : value === 'true';
 function integer(value, fallback, min, max, name) {
@@ -28,10 +29,13 @@ export function containerConfig(env = process.env) {
   if (authMode !== (local ? 'demo' : 'cognito')) throw new Error('Use demo auth locally and Cognito in production');
   if (!local && env.DYNAMO_ENDPOINT) throw new Error('Production must use managed DynamoDB');
   const region = env.AWS_REGION ?? (local ? 'us-east-1' : undefined);
+  // The pilot's shared counter key is optional: leave it unset once every shop signs in with accounts.
   const shopKey = secret(env, 'SHOP_KEY') ?? (local ? 'local-shop-key' : undefined);
   setting(region, 'AWS_REGION');
-  setting(shopKey, 'SHOP_KEY');
-  if (!local && shopKey.length < 16) throw new Error('SHOP_KEY must be at least 16 characters');
+  if (shopKey !== undefined) setting(shopKey, 'SHOP_KEY');
+  if (!local && shopKey !== undefined && shopKey.length < 16) throw new Error('SHOP_KEY must be at least 16 characters');
+  const defaultShopId = env.DEFAULT_SHOP_ID ?? 'campus-shop';
+  if (!SHOP_ID.test(defaultShopId)) throw new Error('Invalid DEFAULT_SHOP_ID');
   const redisTls = bool(env.REDIS_TLS, !local);
   if (!local && !redisTls) throw new Error('Production Redis requires TLS');
   const allowedOrigin = origin(env.ALLOWED_ORIGIN ?? (local ? 'http://localhost:8080' : ''), 'ALLOWED_ORIGIN', local);
@@ -42,12 +46,13 @@ export function containerConfig(env = process.env) {
     items: env.ITEMS_TABLE ?? (local ? 'astrashop-items' : ''),
     reservations: env.RESERVATIONS_TABLE ?? (local ? 'astrashop-reservations' : ''),
     marketplace: env.MARKETPLACE_TABLE ?? (local ? 'astrashop-marketplace' : ''),
+    tenancy: env.TENANCY_TABLE ?? (local ? 'astrashop-tenancy' : ''),
   };
   for (const [name, value] of Object.entries(tables)) {
     if (!/^[\w.-]{3,255}$/.test(value)) throw new Error(`Invalid ${name} table name`);
   }
   return {
-    local, authMode, region, shopKey, tables, allowedOrigin, loginOrigin, clientId, poolId,
+    local, authMode, region, shopKey, defaultShopId, tables, allowedOrigin, loginOrigin, clientId, poolId,
     port: integer(env.PORT, 8080, 1, 65535, 'PORT'), host: env.HOST ?? '0.0.0.0',
     holdMinutes: integer(env.HOLD_MINUTES, 1440, 1, 525600, 'HOLD_MINUTES'),
     testUsers: local ? integer(env.LOCAL_TEST_USERS, 0, 0, 128, 'LOCAL_TEST_USERS') : 0,
