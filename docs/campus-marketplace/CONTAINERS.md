@@ -30,7 +30,7 @@ Only Docker and a POSIX shell are required. The script builds the image and crea
 
 Reports are saved in `artifacts/stress-report.json` and `artifacts/recovery-*.json`. `STRESS_PAIRS=20 ./scripts/stress-local.sh` increases the number of pairs. The maximum is 30. The default uses a random loopback port. Set `STRESS_PORT` only if you need a fixed test port. All load targets must be loopback addresses. The normal Compose setup has no stress identities.
 
-Use `docker compose logs --tail 100 app` to inspect API logs. `/health/live` checks the process. `/health/ready` checks all three tables and Redis. A dependency outage returns 503 with a retry delay. It does not terminate the API process. A restored dependency can return the same process to ready status.
+Use `docker compose logs --tail 100 app` to inspect API logs. `/health/live` checks the process. `/health/ready` checks all four tables and Redis. A dependency outage returns 503 with a retry delay. It does not terminate the API process. A restored dependency can return the same process to ready status.
 
 ## Reuse the image on AWS
 
@@ -42,10 +42,13 @@ The image uses runtime configuration. No frontend rebuild is needed to change fr
 | --- | --- |
 | `APP_ENV=production`, `AUTH_MODE=cognito` | Disable demo accounts and local bootstrap. |
 | `AWS_REGION` | Region used by the AWS SDK. |
-| `ITEMS_TABLE`, `RESERVATIONS_TABLE`, `MARKETPLACE_TABLE` | Existing DynamoDB tables from the SAM stack outputs. |
+| `ITEMS_TABLE`, `RESERVATIONS_TABLE`, `TENANCY_TABLE`, `MARKETPLACE_TABLE` | Existing DynamoDB tables from the SAM stack outputs. Run `backend/migrate-tenancy.mjs` once after upgrading from the single-shop version. |
+| `PHOTO_BUCKET`, `PHOTO_BASE_URL` | Optional item photos: the shop stack's `PhotoBucketName` and `PhotoBaseUrl` outputs. The task role needs `s3:PutObject` on `items/*`. Leave both unset to turn photo upload off. Locally, photos go to the `photo-data` volume and are served at `/photos/`. |
+| `RAZORPAY_WEBHOOK_SECRET` (or `_FILE`) | Optional Razorpay webhook secret for `POST /api/billing/razorpay`. Unset returns `501`. |
+| `DEFAULT_SHOP_ID` | The shop that owns pilot data and that the counter key opens. Defaults to `campus-shop`. |
 | `REDIS_HOST`, `REDIS_PORT` | Reachable private ElastiCache endpoint. |
 | `REDIS_TLS=true`, `REDIS_CLUSTER` | TLS and the cache's cluster mode. |
-| `REDIS_PASSWORD_FILE`, `SHOP_KEY_FILE` | Secret files. ECS can inject the equivalent secret environment values. |
+| `REDIS_PASSWORD_FILE`, `SHOP_KEY_FILE` | Secret files. ECS can inject the equivalent secret environment values. The shop key is optional: without it, staff open the counter only with their accounts. |
 | `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_LOGIN_ORIGIN` | Existing student pool, public app client, and managed login origin. |
 | `ALLOWED_ORIGIN` | Exact HTTPS site origin, also registered as the Cognito callback and logout origin. |
 | `TRUST_PROXY_HOPS` | Keep zero unless a trusted proxy is the only allowed network caller. |

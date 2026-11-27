@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { memoryLimiter, memoryMarketplace } from '../marketplace-local.mjs';
-import { gatewayActor, makeMarketplace } from '../src/marketplace.mjs';
+import { backfillListingWords, gatewayActor, makeMarketplace } from '../src/marketplace.mjs';
 import { handler as signup } from '../src/marketplace-signup.mjs';
 
 const owner = { id: 'seller' };
@@ -202,7 +202,10 @@ test('authorizer claims reject ID tokens and the signup trigger gates the exact 
   assert.deepEqual(await signup(request('Student@ADYPU.edu.in')), request('Student@ADYPU.edu.in'));
   for (const email of ['student@notadypu.edu.in', 'student@adypu.edu.in.evil.invalid', 'adypu.edu.in', 'a@b@adypu.edu.in']) {
     await assert.rejects(signup(request(email)));
+    await assert.rejects(signup({ ...request(email), triggerSource: 'PreSignUp_SignUp' }));
   }
+  const shopkeeper = { triggerSource: 'PreSignUp_AdminCreateUser', request: { userAttributes: { email: 'owner@stationery.example' } } };
+  assert.deepEqual(await signup(shopkeeper), shopkeeper, 'admins can create shop staff accounts without a campus email');
 });
 
 const publicProfile = (call, actor, name, extra = {}) =>
@@ -454,7 +457,8 @@ test('long normalized Unicode search produces reusable bounded cursors', async (
   for (let index = 0; index < 23; index++) await publish(call, input({ title: query + index }));
   const first = await browse(call, { q: query });
   assert.equal(first.body.entries.length, 20);
-  assert.ok(first.body.next.length > 1100);
+  // Long enough to test a long cursor, short enough to fit a URL.
+  assert.ok(first.body.next.length > 800 && first.body.next.length < 1800, `cursor length ${first.body.next.length}`);
   const next = await browse(call, { q: query, cursor: first.body.next });
   assert.equal(next.status, 200);
   assert.equal(next.body.entries.length, 3);
@@ -481,4 +485,44 @@ test('database socket failures return a retryable response without exposing deta
   assert.equal(response.status, 503);
   assert.equal(response.headers['retry-after'], '2');
   assert.ok(!JSON.stringify(response.body).includes('private database address'));
+});
+
+test('search finds a listing by any word of its title, or the start of one', async () => {
+  const call = setup();
+  const sheet = input({ title: 'A2 drawing sheet, pack of 10' });
+  const drafter = input({ title: 'Drafter for drawing class' });
+  await publish(call, sheet);
+  await publish(call, drafter);
+  const ids = async (q) => (await browse(call, { q })).body.entries.map(({ id }) => id).sort();
+  assert.deepEqual(await ids('sheet'), [sheet.id]);
+  assert.deepEqual(await ids('Sheets'), [], 'a longer word than the title has is not a match');
+  assert.deepEqual(await ids('pack sheet'), [sheet.id], 'every word typed must appear, in any order');
+  assert.deepEqual(await ids('dra'), [sheet.id, drafter.id].sort(), 'a listing matching through two words appears once');
+  assert.deepEqual(await ids('drawing class'), [drafter.id]);
+  assert.deepEqual(await ids('?!'), [sheet.id, drafter.id].sort(), 'punctuation alone browses everything');
+  const current = (await call(route('GET', 'mine'), { actor: owner })).body.entries.find(({ id }) => id === sheet.id);
+  const { id: _id, ...fields } = sheet;
+  const edit = await call(route('PUT', 'listings/{id}'), { actor: owner, id: sheet.id, body: { ...fields, title: 'Graph paper pad', version: current.version, status: 'active' } });
+  assert.equal(edit.status, 200);
+  assert.deepEqual(await ids('sheet'), [], 'words from the old title stop matching');
+  assert.deepEqual(await ids('graph'), [sheet.id]);
+});
+
+test('the search backfill moves older listings onto word rows and can run again', async () => {
+  const store = memoryMarketplace();
+  const call = setup({ store });
+  const listing = input({ title: 'Lab coat, size M' });
+  await publish(call, listing);
+  // Rewrite it the way listings were stored before word search.
+  const wordRows = (await Promise.all(['coat', 'lab', 'm', 'size'].map((word) => store.get('WORD#item', `${word}\u0001${listing.id}`)))).filter(Boolean);
+  assert.equal(wordRows.length, 4);
+  await store.transact([
+    ...wordRows.map((row) => ({ kind: 'delete', row })),
+    { kind: 'put', row: { ...wordRows[0], pk: 'TITLE#item', sk: `lab coat, size m\u0001${listing.id}` } },
+  ]);
+  assert.deepEqual((await browse(call, { q: 'coat' })).body.entries, []);
+  assert.equal(await backfillListingWords(store), 1);
+  assert.deepEqual((await browse(call, { q: 'coat' })).body.entries.map(({ id }) => id), [listing.id]);
+  assert.deepEqual(await store.query('TITLE#item', { limit: 10 }), []);
+  assert.equal(await backfillListingWords(store), 0);
 });

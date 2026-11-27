@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, getReservation, reserveItem, type Item, type Reservation } from './api';
+import { ApiError, getMyReservations, getReservation, reserveItem, type Item, type Reservation } from './api';
 import { age, availability, groupCode, until } from './format';
 import { Rupees } from './Rupees';
-import type { Catalog } from './main';
+import {
+  demoMode, marketplaceAccount, marketplaceEnabled, marketRequest, setDemoIdentity, signedIn, startSignIn,
+  type DemoIdentity, type Listing, type Page,
+} from './marketplace-api';
+import { ListingCard } from './marketplace-ui';
+import type { Catalog, Shops } from './main';
 
 type Attempt = {
   id: string;
@@ -13,12 +18,17 @@ type Attempt = {
   reservation?: Reservation;
 };
 
-const storageKey = 'astrashop.reservations';
+// Passes are kept per account, so on a shared phone nobody sees another student's pickup codes.
+// Signed out keeps the original key, so holds made before sign-in existed still show.
+const storageKey = () => {
+  const account = marketplaceAccount();
+  return account === 'guest' ? 'astrashop.reservations' : `astrashop.reservations.${account}`;
+};
 const statusLabel = { HELD: 'Ready at the counter', COLLECTED: 'Collected', RELEASED: 'Released by the shop', EXPIRED: 'Expired' };
 
 function restoreAttempts(): Attempt[] {
   try {
-    const records = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
+    const records = JSON.parse(localStorage.getItem(storageKey()) ?? '[]');
     return Array.isArray(records) ? records.filter((record) => (
       typeof record?.id === 'string' && typeof record.itemId === 'string' && typeof record.itemName === 'string' &&
       typeof record.pickupWindow === 'string' && (!record.reservation || (
@@ -30,7 +40,72 @@ function restoreAttempts(): Attempt[] {
   }
 }
 
-export function Student({ catalog, active }: { catalog: Catalog; active: boolean }) {
+// #item/<shop>/<item> opens one item's page; it is a plain link, so it can be shared.
+function readItemRoute() {
+  const match = window.location.hash.match(/^#item\/([^/]+)\/([^/]+)$/);
+  return match ? { shopId: decodeURIComponent(match[1]), itemId: decodeURIComponent(match[2]) } : undefined;
+}
+const itemHref = (item: Item, shopId: string) => `#item/${encodeURIComponent(item.shopId ?? (shopId || '-'))}/${encodeURIComponent(item.id)}`;
+// Two letters for the label on a card without a photo: "Lab coat, size M" -> "LC".
+const initials = (name: string) => name.split(/[\s,]+/).filter((word) => /^\p{L}/u.test(word)).slice(0, 2)
+  .map((word) => word[0].toUpperCase()).join('') || name.slice(0, 2).toUpperCase();
+
+function Photo({ item, large = false }: { item: Item; large?: boolean }) {
+  const className = large ? 'item-photo' : 'entry-photo';
+  return item.photoUrl
+    ? <img className={className} src={item.photoUrl} alt="" loading={large ? 'eager' : 'lazy'} decoding="async" />
+    : <div className={`${className} is-blank`} aria-hidden="true"><span>{initials(item.name)}</span></div>;
+}
+
+// Marketplace offers that match the search, so a student sees second-hand options next to the shop's.
+function FromStudents({ search }: { search: string }) {
+  const [listings, setListings] = useState<Listing[]>([]);
+  useEffect(() => {
+    setListings([]);
+    if (!marketplaceEnabled || search.length < 2) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      marketRequest<Page<Listing>>(`/listings?q=${encodeURIComponent(search)}`, { signal: controller.signal })
+        .then((page) => setListings(page.entries.slice(0, 3)), () => setListings([]));
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [search]);
+  if (!listings.length) return null;
+  return (
+    <section className="from-students" aria-labelledby="from-students-heading">
+      <div className="from-students-head">
+        <h2 id="from-students-heading">From students</h2>
+        <a href="#marketplace">More in the marketplace</a>
+      </div>
+      <div className="market-grid">{listings.map((listing) => <ListingCard key={listing.id} listing={listing} />)}</div>
+    </section>
+  );
+}
+
+// Shown when a signed-out student taps Reserve: holds belong to an account so one person can't hold a whole shelf.
+function SignInPrompt() {
+  const [error, setError] = useState('');
+  return (
+    <div className="notice sign-in-prompt" role="status">
+      <p>Sign in with your campus account to reserve. You can hold up to three items at a time at each shop.</p>
+      {demoMode ? (
+        <label>Local demo student
+          <select className="field-control" defaultValue="" onChange={(event) => setDemoIdentity(event.target.value as DemoIdentity)}>
+            <option value="" disabled>Choose an account</option>
+            <option value="asha">Asha</option><option value="ravi">Ravi</option><option value="neha">Neha</option>
+          </select>
+        </label>
+      ) : (
+        <button type="button" className="reserve" onClick={() => void startSignIn().catch((cause: Error) => setError(cause.message))}>
+          Campus sign-in
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+export function Student({ catalog, shops, active }: { catalog: Catalog; shops: Shops; active: boolean }) {
   const [query, setQuery] = useState('');
   const [course, setCourse] = useState<string>();
   const [attempts, setAttempts] = useState(restoreAttempts);
@@ -42,12 +117,37 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   const [notice, setNotice] = useState('');
   const [reserveError, setReserveError] = useState('');
   const [refreshError, setRefreshError] = useState('');
+  const [needSignIn, setNeedSignIn] = useState(false);
+  const [itemRoute, setItemRoute] = useState(readItemRoute);
+
+  useEffect(() => {
+    const sync = () => {
+      // A different account (or none) has its own passes.
+      saved.current = restoreAttempts();
+      setAttempts(saved.current);
+      if (!signedIn()) return;
+      setNeedSignIn(false);
+      void refreshReservations(); // passes made on another device appear as soon as the student signs in
+    };
+    const route = () => setItemRoute(readItemRoute());
+    window.addEventListener('marketplace-session-change', sync);
+    window.addEventListener('hashchange', route);
+    return () => {
+      window.removeEventListener('marketplace-session-change', sync);
+      window.removeEventListener('hashchange', route);
+    };
+  }, []);
+
+  // A shared item link can point at a shop other than the one this student last looked at.
+  useEffect(() => {
+    if (itemRoute && shops.current?.id !== itemRoute.shopId && shops.list.some(({ id }) => id === itemRoute.shopId)) shops.choose(itemRoute.shopId);
+  }, [itemRoute?.shopId, shops.list.length]);
 
   function save(next: Attempt[]) {
     saved.current = next;
     setAttempts(next);
     try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
+      localStorage.setItem(storageKey(), JSON.stringify(next));
     } catch {
       // The current tab can still show and retry reservations when storage is unavailable.
     }
@@ -64,12 +164,27 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   }
 
   async function refreshReservations() {
-    if (checking.current || saved.current.length === 0) return;
+    const account = signedIn();
+    if (checking.current || (!account && saved.current.length === 0)) return;
     checking.current = true;
     setRefreshing(true);
     setRefreshError('');
     setNotice(''); // a "held" banner from earlier may no longer be true
-    const snapshot = saved.current;
+    // The account knows every hold, including ones made on another phone or before this browser was cleared.
+    const fresh = new Set<string>();
+    if (account) {
+      try {
+        const passes = await getMyReservations();
+        for (const pass of [...passes].reverse()) { // oldest first, so the newest ends up on top
+          const entry = saved.current.find(({ id }) => id === pass.id);
+          update({ ...(entry ?? { id: pass.id, itemId: pass.itemId, itemName: pass.itemName, pickupWindow: pass.pickupWindow, sample: pass.sample }), reservation: pass });
+          fresh.add(pass.id);
+        }
+      } catch {
+        setRefreshError('Some statuses could not be refreshed. Showing the last known status.');
+      }
+    }
+    const snapshot = saved.current.filter(({ id }) => !fresh.has(id));
     const results = await Promise.allSettled(snapshot.map(({ id }) => getReservation(id)));
     results.forEach((result, index) => {
       const entry = saved.current.find(({ id }) => id === snapshot[index].id);
@@ -97,6 +212,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
     if (submitting.current) return;
     setReserveError('');
     setNotice('');
+    if (!signedIn()) {
+      setNeedSignIn(true);
+      return;
+    }
     let attempt = saved.current.find((entry) => entry.itemId === item.id && !entry.reservation);
     if (!attempt) {
       if (!window.crypto?.randomUUID) {
@@ -124,8 +243,10 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       if (error instanceof ApiError && error.status < 500 && error.status !== 429) {
         const id = attempt.id;
         save(saved.current.filter((entry) => entry.id !== id || entry.reservation));
-        setReserveError(error.status === 409 ? 'Just sold out' : error.message);
-        if (error.status === 409) void catalog.refresh();
+        if (error.status === 401) setNeedSignIn(true);
+        const soldOut = error.status === 409 && error.code !== 'HOLD_LIMIT';
+        setReserveError(soldOut ? 'Just sold out' : error.message);
+        if (soldOut) void catalog.refresh();
       } else {
         setReserveError('Reservation confirmation is pending. Retry it from My reservations.');
       }
@@ -141,81 +262,143 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
   const visibleItems = catalog.items.filter((item) => (!course || item.course === course)
     && `${item.name} ${item.course ?? ''}`.toLowerCase().includes(search));
   const windows = new Set(catalog.items.map((item) => item.pickupWindow));
-  const sharedWindow = windows.size === 1 ? [...windows][0] : undefined;
+  // Items carry their own pickup hours; a shop with no items yet shows its own.
+  const sharedWindow = windows.size === 1 ? [...windows][0] : windows.size === 0 ? shops.current?.pickupWindow || undefined : undefined;
   const sampleStock = catalog.items.some((item) => item.sample);
+
+  const shopId = shops.current?.id ?? '';
+  const holdFor = (item: Item) => ({
+    pending: attempts.some((entry) => entry.itemId === item.id && !entry.reservation),
+    held: attempts.find((entry) => entry.itemId === item.id && entry.reservation?.status === 'HELD')?.reservation,
+  });
+  const reserveButton = (item: Item, label?: string) => {
+    const { pending, held } = holdFor(item);
+    return (item.stock > 0 || pending) && (
+      <button type="button" className="reserve" disabled={!!reserving} onClick={() => void reserve(item)}>
+        {reserving === item.id ? 'Reserving…' : pending ? 'Retry' : held ? 'Reserve another' : label ?? 'Reserve'}
+      </button>
+    );
+  };
+  const detail = itemRoute && catalog.items.find(({ id }) => id === itemRoute.itemId);
 
   return (
     <>
-      <div className="find page-header">
-        <h1 className="page-title"><label htmlFor="item-search">What do you need for class?</label></h1>
-        <input id="item-search" className="search-control" type="search" placeholder="Lab record book, drafter, graph paper" autoComplete="off"
-          value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="courses text-tabs" role="group" aria-label="Filter by course">
-          <button type="button" aria-pressed={!course} onClick={() => setCourse(undefined)}>all</button>
-          {courses.map((name) => (
-            <button type="button" key={name} aria-pressed={course === name} onClick={() => setCourse(name)}>
-              {name.toLowerCase()}
-            </button>
-          ))}
-          <span className="count" aria-live="polite">{visibleItems.length} {visibleItems.length === 1 ? 'item' : 'items'}</span>
+      {itemRoute ? <a className="back-link" href="#">← All items{shops.current ? ` at ${shops.current.name}` : ''}</a> : (
+        <div className="find page-header">
+          <h1 className="page-title"><label htmlFor="item-search">What do you need for class?</label></h1>
+          <input id="item-search" className="search-control" type="search" placeholder="Lab record book, drafter, graph paper" autoComplete="off"
+            value={query} onChange={(event) => setQuery(event.target.value)} />
+          <div className="courses text-tabs" role="group" aria-label="Filter by course">
+            <button type="button" aria-pressed={!course} onClick={() => setCourse(undefined)}>all</button>
+            {courses.map((name) => (
+              <button type="button" key={name} aria-pressed={course === name} onClick={() => setCourse(name)}>
+                {name.toLowerCase()}
+              </button>
+            ))}
+            <span className="count" aria-live="polite">{visibleItems.length} {visibleItems.length === 1 ? 'item' : 'items'}</span>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* The new pass is the visible confirmation; announce it without shifting the page. */}
       <p className="visually-hidden" role="status">{notice}</p>
       {reserveError && <p className="notice error" role="alert">{reserveError}</p>}
+      {needSignIn && <SignInPrompt />}
 
-      <div className={filtering ? 'student-layout is-filtering' : 'student-layout'}>
-        <section className="sheet sheet-ruled" aria-label="Campus shop items">
-          <div className="sheet-head">
-            <div className="sheet-title">
-              <h2>Campus stationery shop</h2>
-              {sharedWindow && <p className="hours">Open {sharedWindow}</p>}
-            </div>
-            {sampleStock && <span className="sample-flag">Sample stock</span>}
-            <button type="button" className="text-button" disabled={catalog.loading} onClick={() => void catalog.refresh()}>
-              {catalog.loading ? 'Refreshing…' : 'Refresh stock'}
-            </button>
-          </div>
-          {catalog.error && <p className="notice error" role="alert">{catalog.error}</p>}
-          {catalog.loading && catalog.items.length === 0 && (
-            <ul className="entries" aria-busy="true" aria-label="Loading items">
-              {[0, 1, 2, 3].map((n) => <li className="entry skeleton" key={n}><span /><span /><span /></li>)}
-            </ul>
-          )}
-          {!catalog.loading && !catalog.error && visibleItems.length === 0 && (
-            <div className="empty">
-              <p>{search || course ? 'Nothing here matches.' : 'The shop hasn’t listed anything yet.'}</p>
-              {(search || course) && (
-                <button type="button" className="text-button" onClick={() => { setQuery(''); setCourse(undefined); }}>Show everything</button>
-              )}
-            </div>
-          )}
-          <ul className="entries">
-            {visibleItems.map((item) => {
-              const pending = attempts.some((entry) => entry.itemId === item.id && !entry.reservation);
-              const held = attempts.find((entry) => entry.itemId === item.id && entry.reservation?.status === 'HELD')?.reservation;
-              const stock = availability(item.stock);
+      <div className={filtering || itemRoute ? 'student-layout is-filtering' : 'student-layout'}>
+        {itemRoute ? (
+          <article className="item-page">
+            {!detail ? (
+              catalog.loading ? <p role="status" className="hint">Loading the item…</p> : (
+                <div className="empty"><p>This item isn’t in the shop’s catalog any more.</p><a href="#">See what’s on the shelf</a></div>
+              )
+            ) : (() => {
+              const stock = availability(detail.stock);
+              const { held } = holdFor(detail);
               return (
-                <li className="entry" key={item.id}>
-                  {item.course && <p className="entry-course">{item.course}</p>}
-                  <h2 className="entry-name">{item.name}</h2>
-                  <p className="entry-price price"><Rupees value={item.price} /></p>
-                  {(item.stock > 0 || pending) && (
-                    <button type="button" className="reserve" disabled={!!reserving} onClick={() => void reserve(item)}>
-                      {reserving === item.id ? 'Reserving…' : pending ? 'Retry' : held ? 'Reserve another' : 'Reserve'}
-                    </button>
-                  )}
-                  <p className={`availability ${stock.level}`}><span className="dot" aria-hidden="true" />{stock.text}</p>
-                  <p className="entry-meta">
-                    {held ? <>Held for you, code {groupCode(held.code)}</> : <>Counted <time dateTime={item.confirmedAt}>{age(item.confirmedAt)}</time></>}
-                    {!sharedWindow && <>, open {item.pickupWindow}</>}
-                  </p>
-                </li>
+                <div className="item-layout">
+                  <Photo item={detail} large />
+                  <div className="item-details">
+                    {detail.course && <p className="entry-course">{detail.course}</p>}
+                    <h1 className="page-title item-title">{detail.name}</h1>
+                    <p className="price item-price"><Rupees value={detail.price} /></p>
+                    <p className={`availability ${stock.level}`}><span className="dot" aria-hidden="true" />{stock.text}</p>
+                    <dl className="item-facts">
+                      {shops.current && <div><dt>Pick up at</dt><dd>{shops.current.name}</dd></div>}
+                      {detail.pickupWindow && <div><dt>Open</dt><dd>{detail.pickupWindow}</dd></div>}
+                      <div><dt>Shelf counted</dt><dd><time dateTime={detail.confirmedAt}>{age(detail.confirmedAt)}</time></dd></div>
+                    </dl>
+                    {held && <p className="notice success">Held for you. Show code <strong>{groupCode(held.code)}</strong> at the counter.</p>}
+                    {detail.sample && <p className="pass-sample">Sample stock, not a real shop item</p>}
+                    <div className="item-reserve">
+                      <p className="price"><Rupees value={detail.price} /></p>
+                      {reserveButton(detail, 'Reserve for pickup') || <p className="hint">Sold out. Check back after the next delivery.</p>}
+                    </div>
+                    <p className="hint">You pay at the counter when you collect. The shop holds it until the time on your pass.</p>
+                  </div>
+                </div>
               );
-            })}
-          </ul>
-        </section>
+            })()}
+          </article>
+        ) : (
+          <div className="catalog-column">
+            <section className="sheet sheet-ruled" aria-labelledby="shop-heading">
+              <div className="sheet-head">
+                <div className="sheet-title">
+                  <h2 id="shop-heading">{shops.current?.name ?? 'Campus stationery shop'}</h2>
+                  {sharedWindow && <p className="hours">Open {sharedWindow}</p>}
+                </div>
+                {shops.list.length > 1 && (
+                  <label className="shop-picker">Shop
+                    <select value={shopId} onChange={(event) => shops.choose(event.target.value)}>
+                      {shops.list.map((shop) => <option key={shop.id} value={shop.id}>{shop.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                {sampleStock && <span className="sample-flag">Sample stock</span>}
+                <button type="button" className="text-button" disabled={catalog.loading} onClick={() => void catalog.refresh()}>
+                  {catalog.loading ? 'Refreshing…' : 'Refresh stock'}
+                </button>
+              </div>
+              {catalog.error && <p className="notice error" role="alert">{catalog.error}</p>}
+              {catalog.loading && catalog.items.length === 0 && (
+                <ul className="entries" aria-busy="true" aria-label="Loading items">
+                  {[0, 1, 2, 3].map((n) => <li className="entry skeleton" key={n}><span className="entry-photo" /><span /><span /><span /></li>)}
+                </ul>
+              )}
+              {!catalog.loading && !catalog.error && visibleItems.length === 0 && (
+                <div className="empty">
+                  <p>{search || course ? 'Nothing at this shop matches.' : 'The shop hasn’t listed anything yet.'}</p>
+                  {(search || course) && (
+                    <button type="button" className="text-button" onClick={() => { setQuery(''); setCourse(undefined); }}>Show everything</button>
+                  )}
+                </div>
+              )}
+              <ul className="entries">
+                {visibleItems.map((item) => {
+                  const { held } = holdFor(item);
+                  const stock = availability(item.stock);
+                  const href = itemHref(item, shopId);
+                  return (
+                    <li className="entry" key={item.id}>
+                      <a className="entry-photo-link" href={href} tabIndex={-1} aria-hidden="true"><Photo item={item} /></a>
+                      {item.course && <p className="entry-course">{item.course}</p>}
+                      <h2 className="entry-name"><a href={href}>{item.name}</a></h2>
+                      <p className="entry-price price"><Rupees value={item.price} /></p>
+                      {reserveButton(item)}
+                      <p className={`availability ${stock.level}`}><span className="dot" aria-hidden="true" />{stock.text}</p>
+                      <p className="entry-meta">
+                        {held ? <>Held for you, code {groupCode(held.code)}</> : <>Counted <time dateTime={item.confirmedAt}>{age(item.confirmedAt)}</time></>}
+                        {!sharedWindow && <>, open {item.pickupWindow}</>}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+            {search && <FromStudents search={search} />}
+          </div>
+        )}
 
         <aside className="panel panel-tinted passes" aria-labelledby="passes-heading">
           <div className="passes-head">

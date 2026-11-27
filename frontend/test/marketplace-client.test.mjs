@@ -7,7 +7,7 @@ import ts from 'typescript';
 const source = await readFile(new URL('../src/marketplace-api.ts', import.meta.url), 'utf8');
 const javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 
-async function client(fetch, { production = false, runtime = {} } = {}) {
+async function client(fetch, { production = false, runtime = {}, location = {} } = {}) {
   const entries = new Map();
   const storage = {
     getItem: (key) => entries.get(key) ?? null,
@@ -15,12 +15,14 @@ async function client(fetch, { production = false, runtime = {} } = {}) {
     removeItem: (key) => entries.delete(key),
   };
   const events = new EventTarget();
+  const replaced = [];
+  const place = { origin: 'https://astrashop.example', hash: '#marketplace', search: '', assign() {}, ...location };
   let time = Date.now();
   const Clock = class extends Date { static now() { return time; } };
   const context = vm.createContext({
     fetch, window: events, sessionStorage: storage, crypto: globalThis.crypto,
-    location: { origin: 'https://astrashop.example', hash: '#marketplace', assign() {} },
-    history: { replaceState() {} }, AbortSignal, Headers, Event, CustomEvent,
+    location: place,
+    history: { replaceState: (_state, _title, url) => replaced.push(url) }, AbortSignal, Headers, Event, CustomEvent,
     TextEncoder, Uint8Array, URLSearchParams, atob, btoa, Date: Clock,
   });
   const module = new vm.SourceTextModule(javascript, {
@@ -37,7 +39,7 @@ async function client(fetch, { production = false, runtime = {} } = {}) {
     return new vm.SyntheticModule(['runtime'], function () { this.setExport('runtime', runtime); }, { context });
   });
   await module.evaluate();
-  return { api: module.namespace, storage, events, advance: (ms) => { time += ms; } };
+  return { api: module.namespace, storage, events, replaced, place, advance: (ms) => { time += ms; } };
 }
 
 test('429 retry delays suppress repeated calls and writes are sent once per user attempt', async () => {
@@ -149,4 +151,20 @@ test('a rejected refresh clears the session once and preserves an account-bound 
   assert.equal(notified, 1);
   assert.equal(api.signedIn(), false);
   assert.equal(api.readListingDraft(key, Boolean).title, 'Saved draft');
+});
+
+test('campus sign-in returns to the screen it started on', async () => {
+  const sub = '00000000-0000-4000-8000-000000000001';
+  const token = 'header.' + Buffer.from(JSON.stringify({ sub })).toString('base64url') + '.signature';
+  for (const [hash, back] of [['', '/'], ['#shop', '/#shop'], ['#marketplace/listing/abc-123', '/#marketplace/listing/abc-123'],
+    ['#item/campus-shop/item-02', '/#item/campus-shop/item-02'], ['#item/x/<script>', '/#marketplace'], ['#evil', '/#marketplace']]) {
+    const { api, storage, replaced, place } = await client(async () => Response.json({ access_token: token, expires_in: 900 }),
+      { production: true, location: { hash } });
+    await api.startSignIn();
+    const { state } = JSON.parse(storage.getItem('astrashop.marketplace.pkce'));
+    place.search = `?code=abc&state=${state}`;
+    await api.finishSignIn();
+    assert.deepEqual(replaced, [back], `signed in from "${hash}"`);
+    assert.equal(api.marketplaceAccount(), sub);
+  }
 });

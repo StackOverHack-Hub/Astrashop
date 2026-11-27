@@ -2,13 +2,15 @@ import { marketplaceCommunity, profileId, publicSellerRoutes } from './marketpla
 import { dependencyUnavailable } from './dependency-errors.mjs';
 import {
   uuid, hashId, rankId, pageSize, digest, rank, row, write, details, account, threadKey,
-  RequestError, requireInput, respond, text, cursorAnchor, page,
+  RequestError, requireInput, respond, text, cursorAnchor, page, signedInUser,
 } from './marketplace-shared.mjs';
 
 export const kinds = ['item', 'service', 'favor'];
 const marketTypes = new Set(kinds);
 const listingConditions = new Set(['', 'new', 'like-new', 'good', 'fair']);
 const fold = (title) => title.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ');
+// The distinct words of a text, folded. A listing is found by any word of its title, or the start of one.
+const words = (value) => [...new Set(fold(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean))];
 const compare = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
 const sameKey = (a, b) => a.pk === b.pk && a.sk === b.sk;
 const messagePartition = (id) => `MESSAGES#${id}`;
@@ -64,7 +66,7 @@ function projections(listing) {
   return [
     owner,
     row(`FEED#${listing.kind}`, sort, publicRow),
-    row(`TITLE#${listing.kind}`, `${fold(listing.title)}\u0001${listing.id}`, publicRow),
+    ...words(listing.title).map((word) => row(`WORD#${listing.kind}`, `${word}\u0001${listing.id}`, publicRow)),
     row(`SELLER-OFFERS#${profileId(listing.owner)}`, sort, publicRow),
   ];
 }
@@ -111,11 +113,29 @@ const temporary = new Set([
 ]);
 
 export function gatewayActor(event) {
-  const claims = event.requestContext?.authorizer?.jwt?.claims;
-  if (!claims || claims.token_use !== 'access' || !uuid.test(claims.sub ?? '')) return;
-  const groups = Array.isArray(claims['cognito:groups']) ? claims['cognito:groups']
-    : String(claims['cognito:groups'] ?? '').replace(/[\[\]"]/g, '').split(/[\s,]+/);
-  return { id: claims.sub, moderator: groups.includes('MarketplaceModerators') };
+  const user = signedInUser(event);
+  return user && { id: user.id, moderator: user.groups.includes('MarketplaceModerators') };
+}
+
+// Moves listings saved before word search onto word rows. Safe to repeat; a listing that changes
+// while it runs has already written its own word rows, so only its old title row is removed.
+export async function backfillListingWords(store) {
+  let moved = 0;
+  for (const kind of kinds) {
+    for (let rows; (rows = await store.query(`TITLE#${kind}`, { ascending: true, limit: 50 })).length;) {
+      for (const old of rows) {
+        const listing = await store.get(...details(old.sk.split('\u0001').at(-1)));
+        const wordRows = listing?.status === 'active' ? projections(listing).filter(({ pk }) => pk.startsWith('WORD#')) : [];
+        const done = await store.transact([
+          ...(listing ? [write('check', listing, listing.version)] : []),
+          write('delete', old), ...wordRows.map((value) => write('put', value)),
+        ]);
+        if (done) moved += 1;
+        else await store.transact([write('delete', old)]);
+      }
+    }
+  }
+  return moved;
 }
 
 export function makeMarketplace(store, limit, { actorFrom = gatewayActor, now = () => new Date() } = {}) {
@@ -130,15 +150,31 @@ export function makeMarketplace(store, limit, { actorFrom = gatewayActor, now = 
     requireInput(kind === undefined || marketTypes.has(kind), 'Unknown category.');
     const search = q === undefined ? '' : searchable(text(q, 'Search', 0, 80), 'Search');
     const context = JSON.stringify(['browse', kind ?? '', search]);
-    const anchor = cursorAnchor(cursor, context, search
-      ? (key) => key.startsWith(search) && uuid.test(key.split('\u0001').at(-1))
+    const terms = words(search);
+    // Walk the rows of the longest word typed, keeping listings whose title has every word typed.
+    const term = terms.reduce((longest, value) => value.length > longest.length ? value : longest, '');
+    const anchor = cursorAnchor(cursor, context, term
+      ? (key) => key.startsWith(term) && uuid.test(key.split('\u0001').at(-1))
       : (key) => rankId.test(key));
-    const sort = search
-      ? { lower: anchor ? `${anchor}\u0000` : search, upper: `${search}\u{10ffff}`, ascending: true }
-      : { upper: anchor };
-    const sets = await Promise.all((kind ? [kind] : kinds).map((value) =>
-      store.query(`${search ? 'TITLE' : 'FEED'}#${value}`, { ...sort, limit: pageSize + 1 })));
-    const matches = sets.flat().sort((a, b) => compare(a.sk, b.sk) * (search ? 1 : -1));
+    const hasEveryTerm = (entry) => {
+      const titleWords = words(entry.title);
+      return terms.every((value) => titleWords.some((word) => word.startsWith(value)));
+    };
+    const searchKind = async (value) => {
+      const found = [];
+      for (let lower = anchor ? `${anchor}\u0000` : term; ;) {
+        const rows = await store.query(`WORD#${value}`, { lower, upper: `${term}\u{10ffff}`, ascending: true, limit: pageSize + 1 });
+        found.push(...rows.filter(hasEveryTerm));
+        if (found.length > pageSize || rows.length <= pageSize) return found;
+        lower = `${rows.at(-1).sk}\u0000`;
+      }
+    };
+    const sets = await Promise.all((kind ? [kind] : kinds).map((value) => term ? searchKind(value)
+      : store.query(`FEED#${value}`, { upper: anchor, limit: pageSize + 1 })));
+    // One listing can match through two of its words ("dra" finds "drafter" and "drawing"): show it once.
+    const seen = new Set();
+    const matches = sets.flat().sort((a, b) => compare(a.sk, b.sk) * (term ? 1 : -1))
+      .filter((entry) => !seen.has(entry.id) && seen.add(entry.id));
     const results = page(matches, context, (entry) => entry);
     return respond(200, { ...results, entries: await community.enrich(results.entries) });
   }

@@ -7,6 +7,11 @@
 import http from 'node:http';
 import { makeHandler } from './src/app.mjs';
 import { fakeDb } from './fake-db.mjs';
+import { migrateToTenancy } from './src/tenancy-migration.mjs';
+import { seedLocalShop } from './src/container-bootstrap.mjs';
+import { bodyLimit, shopRoutes } from './src/http-server.mjs';
+import { memoryPhotos } from './src/photo-store.mjs';
+import { demoIdentities } from './server.mjs';
 import { sampleItems } from './sample-items.mjs';
 import { makeMarketplace } from './src/marketplace.mjs';
 import { memoryMarketplace, memoryLimiter } from './marketplace-local.mjs';
@@ -14,17 +19,25 @@ import { memoryMarketplace, memoryLimiter } from './marketplace-local.mjs';
 const port = Number(process.env.PORT) || 8787;
 const shopKey = process.env.SHOP_KEY || 'local-shop-key';
 const host = process.env.HOST || '127.0.0.1';
-const handler = makeHandler(fakeDb(sampleItems()), {
-  itemsTable: 'items',
-  reservationsTable: 'reservations',
-  shopKey,
-  holdMinutes: Number(process.env.HOLD_MINUTES) || 1440,
+const holdMinutes = Number(process.env.HOLD_MINUTES) || 1440;
+const db = fakeDb(sampleItems());
+// Photos live in memory and are served below, at the API's own address.
+const photos = memoryPhotos(`http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}/photos`);
+const handler = makeHandler(db, {
+  itemsTable: 'items', reservationsTable: 'reservations', tenancyTable: 'tenancy', shopKey, holdMinutes, photos,
 });
+// Demo accounts: asha, ravi and neha are students, owner and staff run the demo shop, admin opens shops.
+const identities = demoIdentities();
+await migrateToTenancy(db, { items: 'items', reservations: 'reservations', tenancy: 'tenancy' }, {
+  shopId: 'campus-shop', name: 'Campus stationery shop', pickupWindow: 'Mon–Sat, 10 am–6 pm', holdMinutes,
+});
+await seedLocalShop(handler, identities, 'campus-shop');
 const profiles = new Map([
   ['Bearer demo-asha', { id: 'asha' }],
   ['Bearer demo-ravi', { id: 'ravi' }],
   ['Bearer demo-neha', { id: 'neha' }],
   ['Bearer demo-moderator', { id: 'moderator', moderator: true }],
+  ...['owner', 'staff', 'admin'].map((name) => [`Bearer demo-${name}`, { id: name }]),
 ]);
 const store = memoryMarketplace();
 const actorFrom = (event) => profiles.get(event.headers.authorization);
@@ -55,10 +68,7 @@ for (const [index, [kind, title, description, meetup, pricePaise]] of [
 
 // The same routes as template.yaml; in AWS, API Gateway does this matching and CORS.
 const routes = [
-  'GET /items', 'POST /reservations', 'GET /reservations/{id}',
-  'GET /shop/reservations', 'PUT /shop/items/{id}',
-  'POST /shop/reservations/{id}/collect', 'POST /shop/reservations/{id}/release', 'POST /shop/reservations/{id}/returned',
-  'POST /shop/reservations/{id}/set-aside', 'GET /shop/stats',
+  ...shopRoutes,
   'GET /marketplace/listings', 'POST /marketplace/listings', 'GET /marketplace/mine',
   'PUT /marketplace/listings/{id}', 'POST /marketplace/listings/{id}/contact',
   'POST /marketplace/listings/{id}/report', 'GET /marketplace/inbox',
@@ -95,6 +105,12 @@ http.createServer(async (req, res) => {
   }
   try {
     const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && pathname.startsWith('/photos/')) {
+      const data = await photos.read(pathname.slice('/photos/'.length));
+      if (!data) return localError(res, 404, 'Not found');
+      res.writeHead(200, { ...cors, 'content-type': `image/${pathname.endsWith('.jpg') ? 'jpeg' : pathname.split('.').pop()}`, 'cache-control': photos.cacheControl });
+      return res.end(data);
+    }
     const route = routes.find(({ method, pattern }) => method === req.method && pattern.test(pathname));
     if (!route) return localError(res, 404, 'Not found');
     const values = route.pattern.exec(pathname).slice(1);
@@ -102,20 +118,21 @@ http.createServer(async (req, res) => {
     let size = 0;
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
       size += chunk.length;
-      if (size > 8192) {
+      if (size > bodyLimit(route.routeKey)) {
         req.resume();
         return localError(res, 413, 'Request is too large.');
       }
       chunks.push(chunk);
     }
     const dispatch = pathname.startsWith('/marketplace/') ? marketplace : handler;
+    const claims = identities.get(req.headers.authorization);
     const out = await dispatch({
       routeKey: route.routeKey,
       pathParameters: Object.fromEntries(route.params.map((name, index) => [name, decodeURIComponent(values[index])])),
       queryStringParameters: Object.fromEntries(searchParams),
       headers: req.headers,
       body: size ? Buffer.concat(chunks).toString('utf8') : undefined,
-      requestContext: { http: { sourceIp: req.socket.remoteAddress } },
+      requestContext: { http: { sourceIp: req.socket.remoteAddress }, ...(claims ? { authorizer: { jwt: { claims } } } : {}) },
     });
     res.writeHead(out.statusCode, { ...out.headers, ...cors });
     res.end(out.body);

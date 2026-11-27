@@ -15,6 +15,7 @@ services:
       ITEMS_TABLE: ${ITEMS_TABLE:-astrashop-items}
       RESERVATIONS_TABLE: ${RESERVATIONS_TABLE:-astrashop-reservations}
       MARKETPLACE_TABLE: ${MARKETPLACE_TABLE:-astrashop-marketplace}
+      TENANCY_TABLE: ${TENANCY_TABLE:-astrashop-tenancy}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_CLUSTER: "false"
@@ -23,11 +24,15 @@ services:
       HOLD_MINUTES: ${HOLD_MINUTES:-1440}
       ALLOWED_ORIGIN: http://localhost:${ASTRASHOP_PORT:-8080}
       LOCAL_TEST_USERS: ${LOCAL_TEST_USERS:-0}
+      # Optional: test Razorpay webhooks locally (Razorpay test mode and a tunnel to this port).
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
     depends_on:
       dynamodb:
         condition: service_started
       redis:
         condition: service_healthy
+    volumes:
+      - photo-data:/data/photos
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -75,3 +80,4 @@ services:
 volumes:
   dynamodb-data:
   redis-data:
+  photo-data:

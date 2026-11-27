@@ -220,6 +220,12 @@ Resources:
     Properties:
       GroupName: MarketplaceModerators
       UserPoolId: !Ref StudentPool
+  # Opens shops and assigns their owners (shop stack: POST /admin/shops).
+  PlatformAdmins:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: PlatformAdmins
+      UserPoolId: !Ref StudentPool
 
   MarketplaceApi:
     Type: AWS::Serverless::HttpApi
@@ -319,6 +325,27 @@ Resources:
       Period: 300
       EvaluationPeriods: 1
       Statistic: Sum
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # Redis down: marketplace writes return 503 until it is back.
+  LimiterUnavailableFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref MarketplaceLogs
+      # A plain term matches whether Lambda wraps the line in its JSON log format or not.
+      FilterPattern: '"marketplace_limiter_unavailable"'
+      MetricTransformations: [{ MetricNamespace: Astrashop, MetricName: LimiterUnavailable, MetricValue: '1', DefaultValue: 0 }]
+  LimiterUnavailableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The marketplace rate limiter (Redis) is unreachable, so writes are refused
+      Namespace: Astrashop
+      MetricName: LimiterUnavailable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
       Threshold: 5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching

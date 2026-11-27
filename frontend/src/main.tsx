@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { getItems, type Item } from './api';
-import { Shop } from './Shop';
+import { getItems, getShopItems, getShops, type Item, type ShopInfo } from './api';
 import { Student } from './Student';
 import { Marketplace } from './Marketplace';
-import { isLoginCallback, marketplaceEnabled } from './marketplace-api';
+import { finishSignIn, isLoginCallback, marketplaceEnabled } from './marketplace-api';
 import '@fontsource-variable/bricolage-grotesque/opsz.css';
 import './styles.css';
 
@@ -14,18 +13,40 @@ export type Catalog = {
   error: string;
   refresh: () => Promise<void>;
 };
+// The shops a student can reserve from, and the one they're looking at.
+export type Shops = { list: ShopInfo[]; current?: ShopInfo; choose: (shopId: string) => void };
+const shopKey = 'astrashop.shop';
 
 function currentScreen() {
-  if (marketplaceEnabled && (/^#marketplace(\/|$)/.test(window.location.hash) || isLoginCallback())) return 'marketplace';
-  return window.location.hash === '#shop' ? 'shop' : 'student';
+  if (marketplaceEnabled && /^#marketplace(\/|$)/.test(window.location.hash)) return 'marketplace';
+  return /^#(admin(\/|$)|shop$)/.test(window.location.hash) ? 'admin' : 'student';
 }
+
+// Shop staff tools load only when someone opens them, so students never download them.
+const Admin = lazy(() => import('./Admin'));
 
 function App() {
   const [screen, setScreen] = useState(currentScreen);
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [signInError, setSignInError] = useState('');
   const latestRequest = useRef(0);
+  // undefined until loaded; an empty list (an older API, or no shop rows yet) falls back to the pilot catalog.
+  const [shopList, setShopList] = useState<ShopInfo[]>();
+  const [shopId, setShopId] = useState(() => { try { return localStorage.getItem(shopKey) ?? ''; } catch { return ''; } });
+  const currentShop = shopList?.find(({ id }) => id === shopId) ?? shopList?.[0];
+  useEffect(() => { getShops().then(setShopList, () => setShopList([])); }, []);
+  const choose = useCallback((id: string) => {
+    setShopId(id);
+    try { localStorage.setItem(shopKey, id); } catch { /* this visit only */ }
+  }, []);
+
+  // Campus sign-in returns here from any screen; finishing it puts back the screen it started on.
+  useEffect(() => {
+    if (!isLoginCallback()) return;
+    void finishSignIn().catch((cause: Error) => setSignInError(cause.message)).finally(() => setScreen(currentScreen()));
+  }, []);
 
   useEffect(() => {
     const syncScreen = () => setScreen(currentScreen());
@@ -34,10 +55,11 @@ function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    if (!shopList) return;
     const id = ++latestRequest.current;
     setLoading(true);
     try {
-      const updated = await getItems();
+      const updated = await (currentShop ? getShopItems(currentShop.id) : getItems());
       if (id !== latestRequest.current) return;
       setItems(updated);
       setError('');
@@ -46,11 +68,12 @@ function App() {
     } finally {
       if (id === latestRequest.current) setLoading(false);
     }
-  }, []);
+  }, [shopList, currentShop?.id]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
   const catalog = { items, loading, error, refresh };
+  const shops: Shops = { list: shopList ?? [], current: currentShop, choose };
   return (
     <>
       {/* Moves focus instead of changing the hash, which picks the screen. */}
@@ -70,12 +93,13 @@ function App() {
         <nav aria-label="Main navigation" className="navigation">
           <a href="#" aria-current={screen === 'student' ? 'page' : undefined}>Find supplies</a>
           {marketplaceEnabled && <a href="#marketplace" aria-current={screen === 'marketplace' ? 'page' : undefined}>Marketplace</a>}
-          <a href="#shop" aria-current={screen === 'shop' ? 'page' : undefined}>Shop counter</a>
+          <a href="#admin" aria-current={screen === 'admin' ? 'page' : undefined}>For shops</a>
         </nav>
       </header>
       <main id="main" tabIndex={-1} className="shell content">
-        <div hidden={screen !== 'student'}><Student catalog={catalog} active={screen === 'student'} /></div>
-        {screen === 'shop' && <Shop catalog={catalog} />}
+        {signInError && <p className="notice error" role="alert">{signInError}</p>}
+        <div hidden={screen !== 'student'}><Student catalog={catalog} shops={shops} active={screen === 'student'} /></div>
+        {screen === 'admin' && <Suspense fallback={<p role="status" className="hint">Loading the shop admin…</p>}><Admin /></Suspense>}
         {screen === 'marketplace' && <Marketplace />}
       </main>
     </>

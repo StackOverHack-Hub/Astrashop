@@ -1,32 +1,105 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  ApiError, confirmStock, getShopReservations, getShopStats, holdAction,
-  type HoldAction, type Item, type Reservation, type ShopStats,
+  ApiError, confirmStock, getCatalog, getItems, getMe, getShopReservations, getShopStats, holdAction,
+  type Counter, type HoldAction, type Item, type Me, type Reservation, type ShopStats,
 } from './api';
 import { age, duration, groupCode, until } from './format';
+import { demoIdentity, demoMode, setDemoIdentity, signedIn, startSignIn, type DemoIdentity } from './marketplace-api';
 import type { Catalog } from './main';
 
-const storageKey = 'astrashop.shop-key';
+const storageKey = 'astrashop.counter';
 
-function readShopKey() {
+function readCounter(): Counter | undefined {
   try {
-    return sessionStorage.getItem(storageKey) ?? '';
+    const saved = JSON.parse(sessionStorage.getItem(storageKey) ?? 'null');
+    if (typeof saved?.key === 'string' && saved.key) return { key: saved.key };
+    if (typeof saved?.shopId === 'string' && typeof saved.name === 'string') return { shopId: saved.shopId, name: saved.name };
   } catch {
-    return '';
+    // Start locked.
   }
+  return undefined;
 }
 
-function storeShopKey(key: string) {
+function storeCounter(counter?: Counter) {
   try {
-    if (key) sessionStorage.setItem(storageKey, key);
+    if (counter) sessionStorage.setItem(storageKey, JSON.stringify(counter));
     else sessionStorage.removeItem(storageKey);
   } catch {
-    // The current tab can still use the key for this visit.
+    // The current tab can still use it for this visit.
   }
 }
 
-export function Shop({ catalog }: { catalog: Catalog }) {
-  const [key, setKey] = useState(readShopKey);
+// The counter's own catalog: an account sees every item of its shop, including any taken off sale
+// (they still need counting); the pilot key sees the pilot shop's public catalog.
+function useCounterItems(counter?: Counter): Catalog {
+  const source = !counter ? '' : 'key' in counter ? '#key' : counter.shopId; // '#' never appears in a shop id
+  const [state, setState] = useState({ source: '', items: [] as Item[], loading: false, error: '' });
+  const latest = useRef(0);
+  const refresh = useCallback(async () => {
+    if (!source) return;
+    const request = ++latest.current;
+    setState((current) => ({ ...current, loading: true }));
+    try {
+      const items = await (source === '#key' ? getItems() : getCatalog(source));
+      if (request === latest.current) setState({ source, items, loading: false, error: '' });
+    } catch (error) {
+      if (request === latest.current) setState((current) => ({ ...current, loading: false, error: (error as Error).message }));
+    }
+  }, [source]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  return { ...state, items: state.source === source ? state.items : [], refresh };
+}
+
+// Staff open their shop's counter with their own account; the shops come from GET /me.
+function CounterSignIn({ open, busy }: { open: (counter: Counter) => void; busy: boolean }) {
+  const [session, setSession] = useState(0);
+  const [me, setMe] = useState<Me>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const sync = () => setSession((n) => n + 1);
+    window.addEventListener('marketplace-session-change', sync);
+    return () => window.removeEventListener('marketplace-session-change', sync);
+  }, []);
+  useEffect(() => {
+    setMe(undefined);
+    setError('');
+    if (!signedIn()) return;
+    let current = true;
+    getMe().then((value) => { if (current) setMe(value); }).catch((cause: Error) => { if (current) setError(cause.message); });
+    return () => { current = false; };
+  }, [session]);
+  return (
+    <section className="panel counter-sign-in" aria-labelledby="staff-heading">
+      <h2 id="staff-heading">Staff sign-in</h2>
+      {demoMode ? (
+        <label>Local demo account
+          <select className="field-control" value={demoIdentity()} onChange={(event) => setDemoIdentity(event.target.value as DemoIdentity)}>
+            <option value="">Choose an account</option>
+            <option value="owner">Shop owner</option><option value="staff">Shop staff</option><option value="asha">Asha, a student</option>
+          </select>
+        </label>
+      ) : !signedIn() && (
+        <button type="button" className="reserve" onClick={() => void startSignIn().catch((cause: Error) => setError(cause.message))}>
+          Campus sign-in
+        </button>
+      )}
+      {error && <p className="notice error" role="alert">{error}</p>}
+      {me && (me.shops.length ? (
+        <div className="counter-shops">
+          {me.shops.map((shop) => (
+            <button type="button" className="reserve" key={shop.shopId} disabled={busy}
+              onClick={() => open({ shopId: shop.shopId, name: shop.name })}>Open {shop.name}</button>
+          ))}
+        </div>
+      ) : <p className="hint">This account isn’t on any shop’s staff. Ask the shop owner to add it.</p>)}
+    </section>
+  );
+}
+
+// `shop` is the shop chosen in the admin console; the counter opens it directly.
+export function Shop({ shop }: { shop?: { shopId: string; name: string } }) {
+  const [counter, setCounter] = useState(readCounter);
+  const catalog = useCounterItems(counter);
   const [entry, setEntry] = useState('');
   const [unlocked, setUnlocked] = useState(false);
   const [held, setHeld] = useState<Reservation[]>([]);
@@ -34,7 +107,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
   const [statsError, setStatsError] = useState(false);
   const [codeQuery, setCodeQuery] = useState('');
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(Boolean(key));
+  const [loading, setLoading] = useState(Boolean(counter));
   const [saving, setSaving] = useState<string>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -42,13 +115,13 @@ export function Shop({ catalog }: { catalog: Catalog }) {
   const latestStats = useRef(0);
   const codeInput = useRef<HTMLInputElement>(null);
   const closedIds = useRef(new Set<string>());
-  // Stock shown when the shopkeeper started typing a recount, sent back as expectedStock.
-  const draftBase = useRef<Record<string, number>>({});
+  // The item as it was when the shopkeeper started typing a recount, sent back so a stale count is refused.
+  const draftBase = useRef<Record<string, Pick<Item, 'stock' | 'version'>>>({});
 
   function signOut() {
     latestStats.current += 1;
-    storeShopKey('');
-    setKey('');
+    storeCounter();
+    setCounter(undefined);
     setEntry('');
     setUnlocked(false);
     setHeld([]);
@@ -61,21 +134,25 @@ export function Shop({ catalog }: { catalog: Catalog }) {
     setError('');
   }
 
-  function report(error: unknown) {
+  function report(error: unknown, used = counter) {
+    const account = used && 'shopId' in used;
     if (error instanceof ApiError && error.status === 401) {
       signOut();
-      setError('Shop key not accepted. Enter the key again.');
+      setError(account ? 'This account can no longer open that counter. Sign in again or ask the shop owner.' : 'Shop key not accepted. Enter the key again.');
     } else {
       setError((error as Error).message);
     }
   }
 
-  async function fetchHolds(candidate: string) {
-    const holds = await getShopReservations(candidate);
+  async function fetchHolds(candidate: Counter) {
+    const holds = await getShopReservations(candidate).catch((error) => {
+      // The queue answers 404 only to an account that is not (or no longer) on this shop's staff.
+      throw error instanceof ApiError && error.status === 404 ? new ApiError(401, error.message) : error;
+    });
     setHeld(holds.filter(({ id }) => !closedIds.current.has(id)));
   }
 
-  async function fetchStats(candidate: string) {
+  async function fetchStats(candidate: Counter) {
     const request = ++latestStats.current;
     try {
       const numbers = await getShopStats(candidate);
@@ -87,20 +164,20 @@ export function Shop({ catalog }: { catalog: Catalog }) {
     }
   }
 
-  async function loadHolds(candidate: string) {
+  async function loadHolds(candidate: Counter) {
     if (inFlight.current) return;
     inFlight.current = true;
     setLoading(true);
     setError('');
     try {
       await fetchHolds(candidate);
-      storeShopKey(candidate);
-      setKey(candidate);
+      storeCounter(candidate);
+      setCounter(candidate);
       setEntry('');
       setUnlocked(true);
       void fetchStats(candidate);
     } catch (error) {
-      report(error);
+      report(error, candidate);
     } finally {
       inFlight.current = false;
       setLoading(false);
@@ -108,8 +185,9 @@ export function Shop({ catalog }: { catalog: Catalog }) {
   }
 
   useEffect(() => {
-    if (key) void loadHolds(key);
-  }, []);
+    const chosen = shop ?? counter;
+    if (chosen) void loadHolds(chosen);
+  }, [shop?.shopId]);
 
   async function write(id: string, action: () => Promise<void>) {
     if (inFlight.current) return;
@@ -130,7 +208,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
   async function finishHold(reservation: Reservation, action: HoldAction) {
     await write(reservation.id, async () => {
       try {
-        await holdAction(reservation.id, action, key);
+        await holdAction(reservation.id, action, counter!);
         if (action !== 'set-aside') { // set aside stays on the list until collected
           closedIds.current.add(reservation.id);
           setHeld((current) => current.filter(({ id }) => id !== reservation.id));
@@ -143,12 +221,12 @@ export function Shop({ catalog }: { catalog: Catalog }) {
         }[action]);
       } catch (error) {
         if (!(error instanceof ApiError && error.status === 409)) throw error;
-        void fetchStats(key);
-        await Promise.all([fetchHolds(key), catalog.refresh()]);
+        void fetchStats(counter!);
+        await Promise.all([fetchHolds(counter!), catalog.refresh()]);
         throw error;
       }
-      void fetchStats(key);
-      await Promise.all([fetchHolds(key), catalog.refresh()]);
+      void fetchStats(counter!);
+      await Promise.all([fetchHolds(counter!), catalog.refresh()]);
     });
   }
 
@@ -167,12 +245,12 @@ export function Shop({ catalog }: { catalog: Catalog }) {
     };
     await write(item.id, async () => {
       try {
-        await confirmStock(item.id, stock, draftBase.current[item.id] ?? item.stock, key);
+        await confirmStock(item.id, stock, draftBase.current[item.id] ?? item, counter!);
       } catch (error) {
         // A reservation or release landed since the count started: show the new number and recount.
         if (error instanceof ApiError && error.status === 409) {
           clearDraft();
-          await Promise.all([catalog.refresh(), fetchHolds(key)]);
+          await Promise.all([catalog.refresh(), fetchHolds(counter!)]);
         }
         throw error;
       }
@@ -195,12 +273,15 @@ export function Shop({ catalog }: { catalog: Catalog }) {
     <>
       <div className="page-header page-header-split">
         <div>
-          <h1 className="page-title">Shop counter</h1>
-          <p className="hint">Set reserved units aside, hand them over against the code, and keep the shelf count honest.</p>
+          <h2 className="counter-title">Counter</h2>
+          <p className="hint">
+            {unlocked && counter && 'name' in counter ? <>{counter.name}. </> : null}
+            Set reserved units aside, hand them over against the code, and keep the shelf count honest.
+          </p>
         </div>
         {unlocked && (
           <div className="counter-actions">
-            <button type="button" className="text-button" disabled={loading || !!saving} onClick={() => void loadHolds(key)}>
+            <button type="button" className="text-button" disabled={loading || !!saving} onClick={() => void loadHolds(counter!)}>
               {loading ? 'Checking…' : 'Refresh'}
             </button>
             <button type="button" className="text-button" disabled={loading || !!saving} onClick={signOut}>Lock counter</button>
@@ -210,16 +291,19 @@ export function Shop({ catalog }: { catalog: Catalog }) {
       {error && <p className="notice error" role="alert">{error}</p>}
       {notice && <p className="notice success" role="status">{notice}</p>}
       {!unlocked ? (
-        <form className="key-form panel" onSubmit={(event) => {
-          event.preventDefault();
-          void loadHolds(entry);
-        }}>
-          <label htmlFor="shop-key">Counter key</label>
-          <p className="hint">The key the shop was given when Astrashop was set up.</p>
-          <input id="shop-key" className="field-control" type="password" value={entry} required autoComplete="off"
-            onChange={(event) => setEntry(event.target.value)} />
-          <button className="reserve" disabled={loading || !entry.trim()}>{loading ? 'Checking key…' : 'Open the counter'}</button>
-        </form>
+        <>
+          <CounterSignIn busy={loading} open={(candidate) => void loadHolds(candidate)} />
+          <form className="key-form panel" onSubmit={(event) => {
+            event.preventDefault();
+            void loadHolds({ key: entry });
+          }}>
+            <label htmlFor="shop-key">Counter key</label>
+            <p className="hint">Only for the pilot shop, until its staff sign in with accounts.</p>
+            <input id="shop-key" className="field-control" type="password" value={entry} required autoComplete="off"
+              onChange={(event) => setEntry(event.target.value)} />
+            <button className="reserve" disabled={loading || !entry.trim()}>{loading ? 'Checking key…' : 'Open the counter'}</button>
+          </form>
+        </>
       ) : (
         <>
           <div className="shop-layout">
@@ -317,7 +401,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
                   <input id={`stock-${item.id}`} className="field-control" type="number" inputMode="numeric" min="0" step="1" required disabled={!!saving}
                     value={drafts[item.id] ?? item.stock} onChange={(event) => {
                       const value = event.target.value;
-                      draftBase.current[item.id] ??= item.stock;
+                      draftBase.current[item.id] ??= { stock: item.stock, version: item.version };
                       setDrafts((current) => ({ ...current, [item.id]: value }));
                     }} />
                   <button className="text-button" disabled={loading || !!saving}>{saving === item.id ? 'Saving…' : 'Confirm'}</button>

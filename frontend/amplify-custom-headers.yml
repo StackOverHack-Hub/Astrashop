@@ -1,11 +1,13 @@
-# Paste into Amplify console → Hosting → Custom headers, after replacing API_ORIGIN
+# Paste into Amplify console → Hosting → Custom headers, after replacing API_ORIGIN and PHOTO_ORIGIN
+# (the shop stack's PhotoBaseUrl output)
 # with your ApiUrl from `sam deploy`, e.g. https://abc123.execute-api.ap-south-1.amazonaws.com
-# If Marketplace is enabled, add its API URL and Cognito login origin to connect-src.
+# Also add the marketplace API URL and Cognito login origin to connect-src: reserving needs sign-in,
+# and sign-in finishes with a request to the login origin.
 customHeaders:
   - pattern: '**'
     headers:
       - key: Content-Security-Policy
-        value: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' API_ORIGIN; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+        value: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: PHOTO_ORIGIN; connect-src 'self' API_ORIGIN; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
       - key: Strict-Transport-Security
         value: max-age=31536000; includeSubDomains
       - key: X-Content-Type-Options

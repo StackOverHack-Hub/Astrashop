@@ -1,7 +1,12 @@
-import { CreateTableCommand, DescribeTableCommand, waitUntilTableExists } from '@aws-sdk/client-dynamodb';
+import { CreateTableCommand, DescribeTableCommand, UpdateTableCommand, waitUntilTableExists } from '@aws-sdk/client-dynamodb';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { sampleItems } from '../sample-items.mjs';
+import { tableSchemas } from './schema.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+
+const keySchema = (names) => names.map((AttributeName, i) => ({ AttributeName, KeyType: i ? 'RANGE' : 'HASH' }));
+const indexDefinition = ([IndexName, names]) => ({ IndexName, KeySchema: keySchema(names), Projection: { ProjectionType: 'ALL' } });
+const attributes = (names) => [...new Set(names)].map((AttributeName) => ({ AttributeName, AttributeType: 'S' }));
 
 export async function initializeLocalTables(client, db, tables) {
   // JVM startup can take longer than the Redis readiness check on a cold host.
@@ -15,23 +20,48 @@ export async function initializeLocalTables(client, db, tables) {
     }
   }
   for (const [name, TableName] of Object.entries(tables)) {
-    const attributes = name === 'marketplace' ? ['pk', 'sk'] : ['id'];
+    const { key, indexes = {} } = tableSchemas[name];
     try {
       await client.send(new CreateTableCommand({
         TableName, BillingMode: 'PAY_PER_REQUEST',
-        AttributeDefinitions: attributes.map((AttributeName) => ({ AttributeName, AttributeType: 'S' })),
-        KeySchema: attributes.map((AttributeName, i) => ({ AttributeName, KeyType: i ? 'RANGE' : 'HASH' })),
+        AttributeDefinitions: attributes([...key, ...Object.values(indexes).flat()]),
+        KeySchema: keySchema(key),
+        ...(Object.keys(indexes).length ? { GlobalSecondaryIndexes: Object.entries(indexes).map(indexDefinition) } : {}),
       }));
     } catch (error) { if (error.name !== 'ResourceInUseException') throw error; }
     await waitUntilTableExists({ client, maxWaitTime: 30, minDelay: 1, maxDelay: 2 }, { TableName });
-    const { Table } = await client.send(new DescribeTableCommand({ TableName }));
-    if (JSON.stringify(Table.KeySchema) !== JSON.stringify(attributes.map((AttributeName, i) => ({ AttributeName, KeyType: i ? 'RANGE' : 'HASH' })))) {
-      throw new Error(`Unexpected key schema for ${TableName}`);
+    let { Table } = await client.send(new DescribeTableCommand({ TableName }));
+    if (JSON.stringify(Table.KeySchema) !== JSON.stringify(keySchema(key))) throw new Error(`Unexpected key schema for ${TableName}`);
+    // Tables kept in the Docker volume from an older version get the indexes added in place.
+    for (const entry of Object.entries(indexes)) {
+      if (Table.GlobalSecondaryIndexes?.some(({ IndexName }) => IndexName === entry[0])) continue;
+      await client.send(new UpdateTableCommand({
+        TableName, AttributeDefinitions: attributes(entry[1]), GlobalSecondaryIndexUpdates: [{ Create: indexDefinition(entry) }],
+      }));
+      for (let attempt = 0; ; attempt++) {
+        ({ Table } = await client.send(new DescribeTableCommand({ TableName })));
+        if (Table.GlobalSecondaryIndexes?.find(({ IndexName }) => IndexName === entry[0])?.IndexStatus === 'ACTIVE') break;
+        if (attempt === 120) throw new Error(`Index ${entry[0]} on ${TableName} did not become active`);
+        await delay(500);
+      }
     }
   }
   for (const Item of sampleItems()) {
     try { await db.send(new PutCommand({ TableName: tables.items, Item, ConditionExpression: 'attribute_not_exists(id)' })); }
     catch (error) { if (error.name !== 'ConditionalCheckFailedException') throw error; }
+  }
+}
+
+// Gives the demo shop an owner and a staff member, through the same route an owner would use.
+export async function seedLocalShop(handler, identities, shopId) {
+  for (const [account, role] of [['owner', 'owner'], ['staff', 'staff']]) {
+    const result = await handler({
+      routeKey: 'PUT /shops/{shopId}/staff/{userId}', headers: {},
+      pathParameters: { shopId, userId: identities.get(`Bearer demo-${account}`).sub },
+      body: JSON.stringify({ role }),
+      requestContext: { authorizer: { jwt: { claims: identities.get('Bearer demo-admin') } } },
+    });
+    if (result.statusCode !== 200) throw new Error(`Local shop seed failed: ${result.statusCode}`);
   }
 }
 
