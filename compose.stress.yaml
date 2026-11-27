@@ -1,0 +1,31 @@
+# Use a separate project so stress data and restarts never touch the local demo.
+services:
+  app:
+    environment:
+      # 0-59 buyer/seller pairs, 62 outsider, 64-127 attack and fuzz identities.
+      LOCAL_TEST_USERS: 128
+    healthcheck:
+      interval: 2s
+      timeout: 5s
+      start_period: 100s
+      retries: 20
+  loadgen:
+    image: astrashop:local
+    profiles: [tools]
+    entrypoint: [node]
+    command: [/tests/stress.mjs]
+    network_mode: service:app
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      STRESS_URL: http://127.0.0.1:8080
+      STRESS_REPORT_PATH: /reports/stress-report.json
+      STRESS_PAIRS: ${STRESS_PAIRS:-12}
+    volumes:
+      - ./backend/stress.mjs:/tests/stress.mjs:ro
+      - ./artifacts:/reports
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 1.0
