@@ -66,6 +66,18 @@ Shop routes need the header `x-shop-key`. Full contract: [IMPLEMENTATION.md](doc
 
 ## Run it on your machine
 
+For the complete local app, install Docker Desktop and double-click `start.command` on macOS or `start.cmd` on Windows. You can also run this command from the project folder:
+
+```bash
+docker compose up --build --wait --wait-timeout 180
+```
+
+Open [localhost:8080](http://localhost:8080). The setup builds one UI and API image. It starts persistent DynamoDB Local and Redis beside it. It creates the local tables and adds sample data without replacing existing records. The counter key is `local-shop-key`. Choose a demo account in Marketplace to try both sides of an exchange.
+
+Use `docker compose down` to stop it. The named volumes keep the data. See the [container runbook](docs/campus-marketplace/CONTAINERS.md) for settings, the one-command stress test, and the AWS configuration for the same image. No AWS account is required for this setup.
+
+### Lightweight preview without Docker
+
 No AWS account needed. This runs the real API code with an in-memory database and the sample catalog. Data resets when you stop it.
 
 ```bash
@@ -80,6 +92,8 @@ cd frontend && npm install && npm run dev
 
 Open http://localhost:5173. The shop counter is at http://localhost:5173/#shop, with the key `local-shop-key`. To watch holds expire quickly, start the API with `HOLD_MINUTES=2 npm run local`. The local server checks for expired holds every minute.
 
+The **Marketplace** tab offers student-to-student listings for items, services, and favors. Choose a local demo account to post or try the inbox. For the separate AWS stack, Cognito login, Redis limits, and staging checks, see the [marketplace runbook](docs/campus-marketplace/OPERATIONS.md).
+
 ## Run the tests
 
 ```bash
@@ -88,7 +102,15 @@ cd backend && npm install && npm test
 
 The tests run the real handler against an in-memory stand-in for DynamoDB that also mimics stale reads, paged scans and throttling. They cover the last-unit race, retries, out of stock, the shop key, double release, collect-then-release, stale recounts, busy/throttled responses, input limits, and hold expiry.
 
-CI (`.github/workflows/ci.yml`) runs these tests, the frontend type-check and build, and `cfn-lint` on the template for every push to `main` and every pull request.
+To test concurrent buyer and seller flows, dependency outages, and recovery in disposable local Docker services:
+
+```bash
+./scripts/stress-local.sh
+```
+
+This command leaves the normal local app and its data in place. It saves reports in `artifacts/` and removes its own test containers and volumes. See the [recorded local results](docs/campus-marketplace/STRESS-TEST.md).
+
+CI (`.github/workflows/ci.yml`) runs the backend and client tests, frontend build, local service integration tests, Docker flow and recovery checks, and `cfn-lint` on both templates.
 
 ## Deploy to AWS
 
@@ -178,9 +200,9 @@ cd backend && sam delete
 The two tables are kept on purpose, so a mistaken delete can't wipe reservations. When you really want them gone, delete them in the DynamoDB console (names from the `ItemsTableName` and `ReservationsTableName` outputs). Then delete the app in the Amplify console.
 
 ## What's left out on purpose
-- **Not in scope:** payments, delivery, chat, and more than one campus.
+- **Not in scope:** online payments, delivery, and more than one campus. Marketplace includes private messages for buyer and seller handover.
 - **Shop login:** one shared key, which is enough for a single pilot shop. Move to Amazon Cognito with an API Gateway JWT authorizer once more than one shop or shopkeeper needs their own login.
-- **Per-IP rate limits:** need AWS WAF, which HTTP APIs don't support. They'd mean fronting the API with CloudFront or switching to a REST API, which isn't worth it at pilot scale.
+- **Shop Lambda limits:** the original shop stack uses API Gateway aggregate throttles. Marketplace and the combined container also use Redis for application limits.
 
 ## License
 MIT, see [LICENSE](LICENSE).
