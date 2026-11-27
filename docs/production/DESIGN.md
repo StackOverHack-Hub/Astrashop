@@ -1,6 +1,6 @@
 # Astrashop production design
 
-Status: Phase 1 built, 27 Nov 2026 (see [Phase 1 as built](#13-phase-1-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
+Status: Phases 1 and 2 built, 27 Nov 2026 (see [Phase 1 as built](#13-phase-1-as-built) and [Phase 2 as built](#14-phase-2-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
 
 **Decisions taken**
 - Sell to campus shops: a monthly fee per shop, with a per-reservation fee as an option.
@@ -266,8 +266,8 @@ Each phase ships on its own and keeps CI green.
 | Phase | Scope | Depends on |
 |---|---|---|
 | **1. Identity and tenancy** | Tenancy table, `shopId` backfill, indexes (removes the scans), `GET /me`, the `authorize()` role table, staff and owner sign-in with the legacy key behind a flag, sign-in to reserve plus the hold cap, Redis limits on shop routes, audit log, cross-tenant tests.<br>**Local parity**, so the README's "no AWS account needed" stays true and the Docker CI keeps passing: `fake-db.mjs` gains `QueryCommand` on indexes (today it supports Scan, Get, Update and transactions only), `container-bootstrap.mjs` creates the indexes and the Tenancy table, and demo identities gain staff, owner and platform-admin accounts. This is the largest phase, and nothing in it is visible to customers. | Nothing |
-| **2. Admin console** | `/admin` with counter, catalog with photos, staff invites, activity, moderation queue, shop onboarding | Phase 1 |
-| **3. Customer experience** | Path routes, search-first home, word search, item page, photos on cards, My passes, shop picker, loading and empty states | Phase 1 for My passes and sign-in. The routing, home and cards can start alongside Phase 1 on a separate branch. Expect a small merge in `Student.tsx` and `api.ts`, where Phase 1 adds sign-in to reserve. |
+| **2. Admin console** (built) | `/admin` with counter, catalog, staff invites, activity, moderation queue, shop onboarding | Phase 1 |
+| **3. Customer experience** | Item photos (upload in the catalog, S3 + CDN, display on cards), path routes, search-first home, word search, item page, My passes, shop picker, loading and empty states | Phase 1 for My passes and sign-in. The routing, home and cards can start alongside Phase 1 on a separate branch. Expect a small merge in `Student.tsx` and `api.ts`, where Phase 1 adds sign-in to reserve. |
 | **4. Money and operations** | Plan and status enforcement, Razorpay webhooks, usage metering, metrics and alarms per shop, stack merge | Phases 1 and 2 |
 
 ## 12. What to revisit as it grows
@@ -319,3 +319,41 @@ Until it runs after an AWS upgrade, the pilot shop's catalog and counter queue l
 - The student item list shows only the default shop. The API supports many shops, and the counter shows the items of whichever shop it opened. The shop picker arrives in Phase 3.
 
 **Not in Phase 1:** campus and email-domain rows, staff invites, the `/admin` screens, item create and edit, and enforcement of a suspended shop's read-only staff. Reserving at a suspended shop is already refused.
+
+## 14. Phase 2 as built
+
+Built 27 Nov 2026 on branch `production/phase-2-admin`.
+
+**What it adds:**
+- The shop admin at `#admin`, loaded as its own chunk of about 33 kB. Sections follow `GET /me`, which now also returns `moderator` and each shop's `status` and `pickupWindow`.
+- Catalog editing with a client-made uuid per new item and version-checked edits. "Off sale" (`active: false`) hides an item from the public catalog and refuses new reservations (`409 UNAVAILABLE`), but it stays in the counter's ledger.
+- Staff invites as single-use links that expire after 7 days. Only a SHA-256 digest of the token is stored. Accepting a link deletes the invite and adds the membership in one transaction, so a link can't be used twice. Someone who is already on the staff gets `409`, and the link stays usable.
+- The activity log, paged newest first. The cursor is checked to belong to the same shop, so it can't page another shop's log.
+- Stats read the new `ByShopCreated` index over a window (`?days=`, 90 by default), which replaces the scan from Phase 1.
+- Platform shop list, status changes (trial, active, suspended), and shops opened without an owner (an owner invite follows).
+- The moderation queue on the existing report and moderate routes.
+
+**Verification**
+- 70 backend unit tests and 8 client tests pass.
+- The integration tests pass three runs in a row against DynamoDB Local. They cover the invite transaction, the filtered catalog query, the reverse-ordered activity page and the stats index.
+- The browser check covered the owner adding and hiding items, the invite created and accepted by another account, the staff counter, the activity log, moderator removal, and platform shop creation and suspension.
+
+**Changes from the plan**
+
+| Planned | Built | Why |
+|---|---|---|
+| Catalog with photos | Photos moved to Phase 3 | Photos need new storage (S3 + CDN, a CSP change, a local stand-in). Students can't see them until Phase 3's cards, so upload and display ship together. |
+| Staff added by account id | Invite links; the id route stays for role changes | Owners don't know Cognito account ids |
+| `GET /me/reservations` and the `ByStudent` index | Still Phase 3 | Nothing in the console needs them |
+
+**Upgrade path:** the pilot stack upgrades in two deploys, Phase 1 then Phase 2. Each adds one index to the reservations table, and CloudFormation allows one per table per deploy. Stats show an error until `ByShopCreated` finishes building.
+
+**Reading after writing on AWS:**
+- Tenancy base-table queries (`/me`, staff, activity, the shop list) use `ConsistentRead`, so a person who has just joined sees their shop at once.
+- Index queries (catalog, queue, stats) can lag a write by a moment. The catalog screen updates its list from the saved item instead of reloading, so it never shows a stale version or misses a new item.
+- Neither DynamoDB Local nor the in-memory database models index lag, so this has not been exercised.
+
+**Known limits:**
+- An owner created by migration, by `ownerId`, or before Phase 2 has no display name, so the console shows the end of the account id.
+- Pending invites can't be listed or revoked. They expire after 7 days.
+- Reports stay listed after their listing is removed; the console marks them.

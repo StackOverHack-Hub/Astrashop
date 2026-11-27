@@ -50,7 +50,14 @@ When the shopkeeper recounts the shelf, the app sends the version of the item th
 Many shops run on one deployment. Everyone signs in with the campus Cognito account the marketplace uses: students, shop staff, shop owners and platform admins. Every route declares who may call it (anyone, a signed-in student, the shop's staff, its owner, or a platform admin), and anything not declared is refused. Someone with no role at a shop gets `404` for it, the same answer as for a shop that doesn't exist.
 
 - **Holds per student.** Reserving needs an account, and each student can hold at most 3 items per shop. The limit is checked in the same all-or-nothing write as the last unit, so two phones racing for the fourth hold get one success and one `409` with `code: HOLD_LIMIT`. A retry of a hold that already went through still returns that hold, even when it took the last unit or the last free hold. Collecting, releasing or expiring a hold gives the place back.
-- **Staff and owners.** A platform admin opens a shop and names its owner. Owners add or remove staff. Staff run the counter for their shop only. Every staff action writes an audit entry (who, what, when), kept for a year.
+- **Staff and owners.** A platform admin opens a shop and sends its owner an invite link. Owners invite staff the same way: the person opens the link, signs in, and joins, so nobody handles account ids. A link works once and expires after 7 days. Staff run the counter for their shop only. Every staff action writes an audit entry (who, what, when), kept for a year.
+- **Shop admin** (**For shops** in the header, `#admin`). Each person sees only their sections:
+  - **Counter:** staff.
+  - **Catalog, Staff and Activity:** owners. In the catalog they add and edit items, or take one off sale; it stays countable but students can't see or reserve it. Staff covers people, invite links and shop details. Activity is the audit log.
+  - **Moderation:** marketplace moderators, for reported listings.
+  - **Shops:** platform admins, who open shops, send owner invites and suspend a shop. A suspended shop takes no new reservations.
+  
+  The console loads separately, so students never download it.
 - **The pilot shop.** Data from before shops existed belongs to the default shop (`DefaultShopId`). The `/shop/*` routes and the shared counter key still open that one shop's counter until its staff sign in with accounts. Unset the key to switch it off.
 
 Every hold has an `expiresAt` (24 hours by default, set by `HoldMinutes`). Every 10 minutes a scheduled run marks overdue holds `EXPIRED` and puts their units back, using the same all-or-nothing write as a release. Expired holds count as no-shows in the dashboard. **Expired pickups** lists each hold until the shopkeeper taps **Back on shelf**, even if the shop was closed for days. The shopkeeper returns any set-aside units before confirming a recount. A hold can still be collected in the few minutes between its deadline and the next expiry run, which gives late students a short grace period. Choose `HoldMinutes` around the shop's hours. A 24-hour hold placed at 5 p.m. on Saturday runs out on Sunday while the shop is closed.
@@ -63,9 +70,18 @@ Signed-in routes take the campus access token as `Authorization: Bearer …`. Th
 |---|---|---|---|
 | GET | `/shops/{shopId}/items` | anyone | A shop's catalog, sorted by name |
 | GET | `/me` | signed in | Your account and the shops where you're staff or owner |
-| PUT | `/shops/{shopId}/staff/{userId}` | owner | `{ role: "owner" \| "staff" \| null }` adds, changes or removes someone's access to the shop (not your own) |
-| POST | `/admin/shops` | platform admin | Open a shop `{ id, name, ownerId, pickupWindow? }` with its first owner |
-| GET, PUT, POST | `/shops/{shopId}/reservations`, `/stats`, `/items/{id}`, `/reservations/{id}/…` | staff | The counter routes below, for that shop. Recounts send `{ stock, expectedVersion }`. |
+| PUT | `/shops/{shopId}/staff/{userId}` | owner | `{ role: "owner" \| "staff" \| null }` changes or removes someone's access to the shop (not your own) |
+| GET | `/shops/{shopId}/staff` | owner | Staff with their roles and the names they gave when joining |
+| POST | `/shops/{shopId}/invites` | owner | `{ role }` makes a single-use link token, valid 7 days. Only a digest is stored. |
+| POST | `/invites/accept` | signed in | `{ token, name? }` joins the shop the invite is for; `404` once used or expired |
+| GET | `/shops/{shopId}/catalog` | staff | Every item, including those off sale |
+| POST | `/shops/{shopId}/items` | owner | `{ id, name, course?, price, stock, pickupWindow? }` adds an item. The client makes the uuid so a retry returns the same item. |
+| PUT | `/shops/{shopId}/items/{id}/details` | owner | `{ name, course, price, pickupWindow, active, expectedVersion }` edits an item or takes it off sale |
+| PUT | `/shops/{shopId}` | owner | `{ name, pickupWindow }` |
+| GET | `/shops/{shopId}/audit` | owner | Activity, newest first, 50 per page with `?cursor=` |
+| GET, POST | `/admin/shops` | platform admin | List shops, or open one `{ id, name, pickupWindow?, ownerId? }` |
+| PUT | `/admin/shops/{shopId}` | platform admin | `{ status: "trial" \| "active" \| "suspended" }` |
+| GET, PUT, POST | `/shops/{shopId}/reservations`, `/stats`, `/items/{id}`, `/reservations/{id}/…` | staff | The counter routes below, for that shop. Recounts send `{ stock, expectedVersion }`. Stats cover the last 90 days, or `?days=`. |
 
 The pilot routes below act on the default shop. `/items` is public, `POST /reservations` needs a signed-in student, and the `/shop/*` routes need the header `x-shop-key`.
 
@@ -90,7 +106,14 @@ For the complete local app, install Docker Desktop and double-click `start.comma
 docker compose up --build --wait --wait-timeout 180
 ```
 
-Open [localhost:8080](http://localhost:8080). The setup builds one UI and API image. It starts persistent DynamoDB Local and Redis beside it. It creates the local tables and adds sample data without replacing existing records, and upgrades tables from an older version in place. Demo accounts: Asha, Ravi and Neha are students, **Shop owner** and **Shop staff** run the demo shop's counter, and the counter key `local-shop-key` still works. Tap Reserve to choose a student. Choose a demo account in Marketplace to try both sides of an exchange.
+Open [localhost:8080](http://localhost:8080). The setup builds one UI and API image. It starts persistent DynamoDB Local and Redis beside it. It creates the local tables and adds sample data without replacing existing records, and upgrades tables from an older version in place. Demo accounts:
+- Asha, Ravi and Neha are students.
+- **Shop owner** and **Shop staff** run the demo shop.
+- **Moderator** reviews marketplace reports.
+- **Platform admin** opens shops.
+- The counter key `local-shop-key` still works.
+
+Choose one under **For shops**. Tap Reserve to choose a student. Choose a demo account in Marketplace to try both sides of an exchange.
 
 Use `docker compose down` to stop it. The named volumes keep the data. See the [container runbook](docs/campus-marketplace/CONTAINERS.md) for settings, the one-command stress test, and the AWS configuration for the same image. No AWS account is required for this setup.
 
@@ -108,7 +131,7 @@ In a second terminal:
 cd frontend && npm install && npm run dev
 ```
 
-Open http://localhost:5173. Tap Reserve and choose a demo student. The shop counter is at http://localhost:5173/#shop: choose **Shop staff** or **Shop owner**, or use the key `local-shop-key`. To watch holds expire quickly, start the API with `HOLD_MINUTES=2 npm run local`. The local server checks for expired holds every minute.
+Open http://localhost:5173. Tap Reserve and choose a demo student. The shop admin is at http://localhost:5173/#admin: choose **Shop owner**, **Shop staff**, **Moderator** or **Platform admin**, or use the key `local-shop-key` on the counter. To watch holds expire quickly, start the API with `HOLD_MINUTES=2 npm run local`. The local server checks for expired holds every minute.
 
 The **Marketplace** tab offers student-to-student listings for items, services, and favors. Choose a local demo account to post or try the inbox. For the separate AWS stack, Cognito login, Redis limits, and staging checks, see the [marketplace runbook](docs/campus-marketplace/OPERATIONS.md).
 
@@ -189,7 +212,13 @@ A shopkeeper without a campus email gets an account from an administrator. Self 
 aws cognito-idp admin-create-user --user-pool-id <CognitoUserPoolId> --username owner@shop.example --user-attributes Name=email,Value=owner@shop.example Name=email_verified,Value=true
 ```
 
-To open more shops, add a platform admin to the `PlatformAdmins` Cognito group. That admin then calls `POST /admin/shops` with the new owner's account id.
+To open more shops, add a platform admin to the `PlatformAdmins` Cognito group. That admin opens the shop under **For shops → Shops** and sends the owner the invite link.
+
+**Upgrading the single-shop pilot takes two deploys.** CloudFormation adds only one index per table per deploy, and Phases 1 and 2 each add one to the reservations table.
+1. Deploy Phase 1 (commit `c656253`, which adds `Queue`) and run `migrate-tenancy.mjs`.
+2. Deploy this version (which adds `ByShopCreated`).
+
+While the new index builds, the counter's numbers panel shows its error state; it recovers on its own.
 
 5. Build the frontend against your API and the marketplace stack's sign-in. Reserving needs sign-in, so the Cognito settings are required.
 
@@ -249,7 +278,7 @@ The three tables are kept on purpose, so a mistaken delete can't wipe reservatio
 ## What's left out on purpose
 - **Not in scope:** online payments, delivery, and more than one campus. Marketplace includes private messages for buyer and seller handover.
 - **Shop Lambda limits:** the shop Lambda has no Redis, so it relies on API Gateway throttles and the per-student hold limit. Marketplace and the combined container also use Redis for application limits.
-- **Still to come:** the admin screens (catalog, staff, moderation, shop onboarding), item photos, word search, and billing. See the phases in [DESIGN.md](docs/production/DESIGN.md#11-phases).
+- **Still to come:** item photos, the storefront redesign, word search, and billing. See the phases in [DESIGN.md](docs/production/DESIGN.md#11-phases).
 
 ## License
 MIT, see [LICENSE](LICENSE).

@@ -36,11 +36,11 @@ const sessionKey = 'astrashop.marketplace.session';
 const pendingKey = 'astrashop.marketplace.pkce';
 const scope = 'openid astrashop/marketplace';
 type Session = { access: string; expires: number; refresh?: string };
-// Local demo accounts: three students, a marketplace moderator, and the demo shop's owner and staff.
-const demoAccounts = ['asha', 'ravi', 'neha', 'moderator', 'owner', 'staff'] as const;
+// Local demo accounts: three students, a marketplace moderator, the demo shop's owner and staff, and a platform admin.
+const demoAccounts = ['asha', 'ravi', 'neha', 'moderator', 'owner', 'staff', 'admin'] as const;
 export type DemoIdentity = '' | typeof demoAccounts[number];
-// Where a sign-in may return to: the item list, the counter, or a marketplace page.
-const destinations = /^(#marketplace(\/(listing|seller)\/[a-f0-9-]+)?|#shop|)$/;
+// Where a sign-in may return to: the item list, the shop admin (including an invite link), or a marketplace page.
+const destinations = /^(#marketplace(\/(listing|seller)\/[a-f0-9-]+)?|#shop|#admin(\/[a-z]+|\/join\/[A-Za-z0-9_-]{32})?|)$/;
 let cached: Session | undefined;
 let refreshInFlight: Promise<Session> | undefined;
 const retryWindows = new Map<string, number>();

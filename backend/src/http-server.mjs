@@ -10,6 +10,9 @@ export const shopRoutes = [
   'GET /shops/{shopId}/items', 'GET /shops/{shopId}/reservations', 'PUT /shops/{shopId}/items/{id}', 'GET /shops/{shopId}/stats',
   ...['collect', 'release', 'returned', 'set-aside'].map((action) => `POST /shops/{shopId}/reservations/{id}/${action}`),
   'PUT /shops/{shopId}/staff/{userId}', 'POST /admin/shops',
+  'GET /shops/{shopId}/catalog', 'POST /shops/{shopId}/items', 'PUT /shops/{shopId}/items/{id}/details', 'PUT /shops/{shopId}',
+  'GET /shops/{shopId}/staff', 'POST /shops/{shopId}/invites', 'POST /invites/accept', 'GET /shops/{shopId}/audit',
+  'GET /admin/shops', 'PUT /admin/shops/{shopId}',
 ];
 const routes = [
   ...shopRoutes,

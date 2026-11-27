@@ -122,7 +122,7 @@ test('owners manage staff, staff cannot, and nobody changes their own access', a
   assert.equal((await grant(ownerA, 'shop-a', ownerA.id, null)).status, 409);
   assert.equal((await grant(ownerA, 'shop-a', newcomer.id, 'manager')).status, 400);
   assert.equal((await grant(ownerA, 'shop-a', newcomer.id, 'staff')).status, 200);
-  assert.deepEqual((await call('GET /me', { as: newcomer })).body.shops, [{ shopId: 'shop-a', name: 'Shop A', role: 'staff' }]);
+  assert.deepEqual((await call('GET /me', { as: newcomer })).body.shops, [{ shopId: 'shop-a', name: 'Shop A', role: 'staff', status: 'trial', pickupWindow: '' }]);
   assert.equal((await call('GET /shops/{shopId}/reservations', { as: newcomer, params: { shopId: 'shop-a' } })).status, 200);
   assert.equal((await grant(ownerA, 'shop-a', newcomer.id, null)).status, 200);
   assert.equal((await call('GET /shops/{shopId}/reservations', { as: newcomer, params: { shopId: 'shop-a' } })).status, 404, 'removal takes effect at once');
@@ -192,7 +192,7 @@ test('the migration moves pilot data into the pilot shop and can run again', asy
   assert.deepEqual((await call('GET /items')).map((item) => [item.id, item.version]), [['item-01', 0]]);
   assert.deepEqual((await call('GET /shop/reservations')).map((r) => r.id).sort(), [held.id, expired.id].sort());
   assert.equal(db.tables.reservations.get(held.id).expiresAt, '2026-11-28T09:00:00.000Z');
-  assert.deepEqual((await call('GET /me', { actor: ownerA, headers: {} })).shops, [{ shopId: 'pilot', name: 'Pilot shop', role: 'owner' }]);
+  assert.deepEqual((await call('GET /me', { actor: ownerA, headers: {} })).shops, [{ shopId: 'pilot', name: 'Pilot shop', role: 'owner', status: 'active', pickupWindow: '' }]);
   const collect = await handler({ routeKey: 'POST /shops/{shopId}/reservations/{id}/collect', actor: ownerA, pathParameters: { shopId: 'pilot', id: held.id }, headers: {} });
   assert.equal(collect.statusCode, 200, 'an anonymous pilot hold is collected by account');
 });

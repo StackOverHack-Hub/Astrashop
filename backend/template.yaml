@@ -119,11 +119,17 @@ Resources:
         - { AttributeName: id, AttributeType: S }
         - { AttributeName: queueShop, AttributeType: S }
         - { AttributeName: expiresAt, AttributeType: S }
+        - { AttributeName: shopId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
-      # queueShop exists only while a hold needs the counter, so this index stays small.
+      # queueShop exists only while a hold needs the counter, so Queue stays small.
+      # ByShopCreated serves shop stats over a window of days (added in its own deploy, after Queue).
       GlobalSecondaryIndexes:
         - IndexName: Queue
           KeySchema: [{ AttributeName: queueShop, KeyType: HASH }, { AttributeName: expiresAt, KeyType: RANGE }]
+          Projection: { ProjectionType: ALL }
+        - IndexName: ByShopCreated
+          KeySchema: [{ AttributeName: shopId, KeyType: HASH }, { AttributeName: createdAt, KeyType: RANGE }]
           Projection: { ProjectionType: ALL }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
@@ -187,6 +193,16 @@ Resources:
         SetAside: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/reservations/{id}/set-aside', Method: POST } }
         Staff: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/staff/{userId}', Method: PUT } }
         CreateShop: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /admin/shops, Method: POST } }
+        ListShops: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /admin/shops, Method: GET } }
+        ShopStatus: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/admin/shops/{shopId}', Method: PUT } }
+        ShopSettings: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}', Method: PUT } }
+        Catalog: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/catalog', Method: GET } }
+        CreateItem: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items', Method: POST } }
+        EditItem: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items/{id}/details', Method: PUT } }
+        StaffList: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/staff', Method: GET } }
+        Invite: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/invites', Method: POST } }
+        AcceptInvite: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /invites/accept, Method: POST } }
+        Activity: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/audit', Method: GET } }
         # Pilot routes for the default shop, guarded by the counter key inside the function.
         ShopHeld: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shop/reservations, Method: GET, Auth: { Authorizer: NONE } } }
         ShopStock: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shop/items/{id}', Method: PUT, Auth: { Authorizer: NONE } } }

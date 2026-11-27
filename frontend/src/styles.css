@@ -482,3 +482,40 @@ textarea.field-control { resize: vertical; }
 .counter-sign-in { display: grid; gap: .9rem; max-width: 26rem; margin-bottom: var(--section-gap); }
 .counter-sign-in h2 { font-size: 1.15rem; }
 .counter-shops { display: flex; flex-wrap: wrap; gap: .6rem; }
+
+/* Shop admin. Same panels, rules and text tabs as the rest of the app. */
+.admin-tabs { margin-bottom: var(--section-gap); }
+.admin-tabs a {
+  display: inline-flex; align-items: center; min-height: var(--target);
+  border-bottom: 2px solid transparent; color: var(--graphite); text-decoration: none;
+}
+.admin-tabs a:hover { color: var(--ink); }
+.admin-tabs a[aria-current='page'] { color: var(--ink); border-bottom-color: var(--blue); font-weight: 650; }
+.admin-account { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem 1.1rem; }
+.admin-account label { display: grid; gap: .25rem; font-size: .875rem; font-weight: 600; }
+.panel + .panel { margin-top: var(--section-gap); }
+.panel-head-split { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: .75rem 1.5rem; }
+.admin-list > li { padding: .8rem 0; border-bottom: 1px solid var(--rule); }
+.admin-list > li:last-child { border-bottom: 0; }
+.admin-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.1rem; }
+.admin-row > div:first-child { flex: 1 1 16rem; min-width: 0; }
+.admin-row select { width: auto; }
+.admin-name { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; font-weight: 650; }
+.tag {
+  padding: .05rem .5rem; border-radius: 999px; background: var(--blue-wash); color: var(--graphite);
+  font-size: .75rem; font-weight: 600;
+}
+.admin-form { max-width: var(--form-width); margin-bottom: 1rem; }
+.admin-form h3, .invite h3 { font-size: 1rem; }
+.checkbox { display: flex !important; align-items: center; gap: .55rem; font-weight: 500; }
+.invite { display: grid; gap: .6rem; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+.invite-link { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .8rem; margin-top: .6rem; }
+.invite-link input { flex: 1 1 18rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+.invite-link .hint { flex-basis: 100%; }
+.activity li { font-size: .925rem; }
+.activity time { display: inline-block; min-width: 7.5rem; color: var(--graphite); font-size: .85rem; }
+.report-reason { margin: .2rem 0; overflow-wrap: anywhere; }
+.join { max-width: var(--form-width); }
+.join .reserve { display: inline-block; text-decoration: none; }
+.invite .field-control { width: auto; }
+.counter-title { font-size: var(--section-title); }

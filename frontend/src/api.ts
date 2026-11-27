@@ -11,6 +11,7 @@ export type Item = {
   pickupWindow: string;
   sample?: boolean;
   version?: number;
+  active?: boolean;
 };
 
 export type Reservation = {
@@ -43,7 +44,15 @@ export class ApiError extends Error {
   }
 }
 
-export type Me = { id: string; platformAdmin: boolean; shops: { shopId: string; name: string; role: 'owner' | 'staff' }[] };
+export type Role = 'owner' | 'staff';
+export type ShopStatus = 'trial' | 'active' | 'suspended';
+export type Membership = { shopId: string; name: string; role: Role; status: ShopStatus; pickupWindow: string };
+export type Me = { id: string; platformAdmin: boolean; moderator: boolean; shops: Membership[] };
+export type StaffMember = { userId: string; role: Role; name: string; addedAt?: string };
+export type Invite = { token: string; role: Role; expiresAt: string };
+export type AuditEntry = { id: string; at: string; actor: string; action: string; target: string; detail: Record<string, unknown> };
+export type ShopSummary = { id: string; name: string; pickupWindow: string; status: ShopStatus; plan: string; createdAt: string };
+export type ItemInput = { name: string; course: string; price: number; pickupWindow: string };
 // Staff open the counter with their account; the pilot shop can still use its shared key.
 export type Counter = { shopId: string; name: string } | { key: string };
 
@@ -102,7 +111,6 @@ const counterPath = (counter: Counter, path: string) =>
   'key' in counter ? `/shop${path}` : `/shops/${encodeURIComponent(counter.shopId)}${path}`;
 
 export const getItems = () => request<Item[]>('/items');
-export const getShopItems = (shopId: string) => request<Item[]>(`/shops/${encodeURIComponent(shopId)}/items`);
 export const getMe = () => request<Me>('/me', { signedIn: true });
 export const getReservation = (id: string) => request<Reservation>(`/reservations/${encodeURIComponent(id)}`);
 export const getShopReservations = (counter: Counter) => request<Reservation[]>(counterPath(counter, '/reservations'), { counter });
@@ -136,3 +144,24 @@ export const holdAction = (id: string, action: HoldAction, counter: Counter) =>
   request<Pick<Reservation, 'id' | 'status'>>(counterPath(counter, `/reservations/${encodeURIComponent(id)}/${action}`), {
     method: 'POST', counter,
   });
+
+// Shop admin: catalog, staff, invites, activity, and platform shops. All need a signed-in account.
+const shopPath = (shopId: string, path = '') => `/shops/${encodeURIComponent(shopId)}${path}`;
+const signed = <T>(path: string, method?: 'POST' | 'PUT', body?: object) => request<T>(path, { method, body, signedIn: true });
+export const getCatalog = (shopId: string) => signed<Item[]>(shopPath(shopId, '/catalog'));
+export const createItem = (shopId: string, item: ItemInput & { id: string; stock: number }) => signed<Item>(shopPath(shopId, '/items'), 'POST', item);
+export const updateItem = (shopId: string, id: string, item: ItemInput & { active: boolean; expectedVersion: number }) =>
+  signed<Item>(shopPath(shopId, `/items/${encodeURIComponent(id)}/details`), 'PUT', item);
+export const updateShop = (shopId: string, shop: { name: string; pickupWindow: string }) => signed<ShopSummary>(shopPath(shopId), 'PUT', shop);
+export const getStaff = (shopId: string) => signed<StaffMember[]>(shopPath(shopId, '/staff'));
+export const setStaffRole = (shopId: string, userId: string, role: Role | null) =>
+  signed<StaffMember>(shopPath(shopId, `/staff/${encodeURIComponent(userId)}`), 'PUT', { role });
+export const createInvite = (shopId: string, role: Role) => signed<Invite>(shopPath(shopId, '/invites'), 'POST', { role });
+export const acceptInvite = (token: string, name: string) => signed<{ shopId: string; name: string; role: Role }>('/invites/accept', 'POST', { token, name });
+export const getAudit = (shopId: string, cursor?: string) =>
+  signed<{ entries: AuditEntry[]; next: string | null }>(shopPath(shopId, `/audit${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`));
+export const listShops = () => signed<ShopSummary[]>('/admin/shops');
+export const createShop = (shop: { id: string; name: string; pickupWindow: string }) => signed<ShopSummary>('/admin/shops', 'POST', shop);
+export const setShopStatus = (shopId: string, status: ShopStatus) =>
+  signed<{ id: string; status: ShopStatus }>(`/admin/shops/${encodeURIComponent(shopId)}`, 'PUT', { status });
+export const inviteLink = (token: string) => `${location.origin}/#admin/join/${token}`;

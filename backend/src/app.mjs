@@ -1,9 +1,9 @@
-import { randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dependencyUnavailable } from './dependency-errors.mjs';
-import { signedInUser } from './marketplace-shared.mjs';
+import { digest, signedInUser } from './marketplace-shared.mjs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
-  DynamoDBDocumentClient, ScanCommand, QueryCommand, GetCommand, UpdateCommand, TransactWriteCommand,
+  DynamoDBDocumentClient, QueryCommand, GetCommand, TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -11,6 +11,21 @@ export const SHOP_ID = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 const MAX_ID = 128;
 const MAX_STOCK = 100000;
 const AUDIT_DAYS = 365;
+const INVITE_DAYS = 7;
+const MAX_PRICE = 100000;
+const INVITE_TOKEN = /^[A-Za-z0-9_-]{32}$/;
+const SHOP_STATUSES = ['trial', 'active', 'suspended'];
+const ROLES = ['owner', 'staff'];
+// Plain text a person typed: trimmed length within bounds and no control characters.
+const isText = (value, min, max) => typeof value === 'string' && value.trim().length >= min && value.length <= max
+  && !/[\u0000-\u001f\u007f]/.test(value);
+const isPrice = (n) => Number.isSafeInteger(n) && n >= 0 && n <= MAX_PRICE;
+// The catalog fields an owner edits. Returns the cleaned values, or undefined when any is invalid.
+const itemFields = (body) => {
+  const { name, course = '', price, pickupWindow = '' } = body;
+  if (!isText(name, 2, 80) || !isText(course, 0, 40) || !isPrice(price) || !isText(pickupWindow, 0, 80)) return;
+  return { name: name.trim(), course: course.trim(), price, pickupWindow: pickupWindow.trim() };
+};
 // Errors worth retrying: the client resends the same request and gets a real answer.
 const TRANSIENT = new Set([
   'TransactionConflictException', 'ProvisionedThroughputExceededException',
@@ -31,6 +46,16 @@ const view = ({ queueShop, studentId, ...reservation }) => reservation;
 // or a platform admin. A route that is not listed here does not exist.
 const access = {
   'GET /shops/{shopId}/items': 'public',
+  'POST /invites/accept': 'signedIn',
+  'GET /shops/{shopId}/catalog': 'staff',
+  'POST /shops/{shopId}/items': 'owner',
+  'PUT /shops/{shopId}/items/{id}/details': 'owner',
+  'PUT /shops/{shopId}': 'owner',
+  'GET /shops/{shopId}/staff': 'owner',
+  'POST /shops/{shopId}/invites': 'owner',
+  'GET /shops/{shopId}/audit': 'owner',
+  'GET /admin/shops': 'platform',
+  'PUT /admin/shops/{shopId}': 'platform',
   'GET /reservations/{id}': 'public', // the id is a random secret only the student's phone knows
   'GET /me': 'signedIn',
   'POST /reservations': 'signedIn',
@@ -47,7 +72,9 @@ const access = {
 
 export function shopActor(event) {
   const user = signedInUser(event);
-  return user && { id: user.id, platformAdmin: user.groups.includes('PlatformAdmins') };
+  return user && {
+    id: user.id, platformAdmin: user.groups.includes('PlatformAdmins'), moderator: user.groups.includes('MarketplaceModerators'),
+  };
 }
 
 export function makeHandler(db, {
@@ -137,7 +164,7 @@ export function makeHandler(db, {
     const cutoff = now().toISOString();
     const counts = { expired: 0, deferred: 0, failed: 0 };
     const shops = await readAll(QueryCommand, {
-      TableName: tenancyTable, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'SHOP' },
+      TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'SHOP' },
     });
     for (const shopId of new Set([defaultShopId, ...shops.map((shop) => shop.sk)])) {
       const due = await readAll(QueryCommand, {
@@ -179,18 +206,31 @@ export function makeHandler(db, {
   const notHeld = () => json(409, { error: 'Reservation is not on hold' });
 
   const routes = {
+    // Items the owner has taken off sale stay in the counter's catalog but not in the public one.
     'GET /shops/{shopId}/items': async ({ params }) => json(200, await readAll(QueryCommand, {
+      TableName: itemsTable, IndexName: 'ByShop', KeyConditionExpression: 'shopId = :shop',
+      FilterExpression: 'attribute_not_exists(active) OR active = :yes',
+      ExpressionAttributeValues: { ':shop': params.shopId, ':yes': true },
+    })),
+
+    'GET /shops/{shopId}/catalog': async ({ params }) => json(200, await readAll(QueryCommand, {
       TableName: itemsTable, IndexName: 'ByShop', KeyConditionExpression: 'shopId = :shop',
       ExpressionAttributeValues: { ':shop': params.shopId },
     })),
 
     'GET /me': async ({ actor }) => {
-      const shops = await readAll(QueryCommand, {
-        TableName: tenancyTable, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': `USER#${actor.id}` },
+      const memberships = await readAll(QueryCommand, {
+        TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': `USER#${actor.id}` },
       });
+      // Names and status come from the shop row, so a renamed or suspended shop shows up at once.
+      const shops = await Promise.all(memberships.map(async ({ sk, role }) => {
+        const shopId = sk.slice('SHOP#'.length);
+        const shop = await get(tenancyTable, shopRow(shopId));
+        return shop && { shopId, name: shop.name, role, status: shop.status ?? 'active', pickupWindow: shop.pickupWindow ?? '' };
+      }));
       return json(200, {
-        id: actor.id, platformAdmin: Boolean(actor.platformAdmin),
-        shops: shops.map(({ sk, name, role }) => ({ shopId: sk.slice('SHOP#'.length), name, role })),
+        id: actor.id, platformAdmin: Boolean(actor.platformAdmin), moderator: Boolean(actor.moderator),
+        shops: shops.filter(Boolean),
       });
     },
 
@@ -209,6 +249,7 @@ export function makeHandler(db, {
       };
       const item = await get(itemsTable, { id: itemId });
       if (!item) return await returnExisting() ?? json(404, { error: 'Item not found' });
+      if (item.active === false) return await returnExisting() ?? json(409, { code: 'UNAVAILABLE', error: 'This item is no longer on sale.' });
       const shopId = shopOf(item);
       // shortcut: codes are random, not unique; two holds on the same item sharing a code are
       // interchangeable at the counter. Claim codes in the transaction if a shop sees code clashes.
@@ -298,12 +339,16 @@ export function makeHandler(db, {
       }
     },
 
-    // App activity from every reservation. The pilot separately tracks the student's start and deadline.
-    // shortcut: scans every shop's reservations; add a shopId + createdAt index with the Phase 2
-    // activity screen (CloudFormation adds one index per table per deploy).
-    'GET /shops/{shopId}/stats': async ({ params }) => {
-      const rows = (await readAll(ScanCommand, { TableName: reservationsTable, ConsistentRead: true }))
-        .filter((r) => shopOf(r) === params.shopId);
+    // Reservation activity over the last `days` days (90 by default). The pilot separately tracks the
+    // student's start and deadline.
+    'GET /shops/{shopId}/stats': async ({ params, query }) => {
+      const days = query.days === undefined ? 90 : Number(query.days);
+      if (!Number.isSafeInteger(days) || days < 1 || days > 3650) return json(400, { error: 'days must be a whole number from 1 to 3650' });
+      const rows = await readAll(QueryCommand, {
+        TableName: reservationsTable, IndexName: 'ByShopCreated',
+        KeyConditionExpression: 'shopId = :shop AND createdAt >= :since',
+        ExpressionAttributeValues: { ':shop': params.shopId, ':since': new Date(now().getTime() - days * 86_400_000).toISOString() },
+      });
       const minutes = (from, to) => (Date.parse(to) - Date.parse(from)) / 60_000;
       const median = (values) => {
         if (values.length === 0) return null;
@@ -323,6 +368,7 @@ export function makeHandler(db, {
         medianMinutesToSetAside: median(rows.filter((r) => r.setAsideAt).map((r) => minutes(r.createdAt, r.setAsideAt))),
         medianMinutesToCollect: median(rows.filter((r) => r.collectedAt).map((r) => minutes(r.createdAt, r.collectedAt))),
         since: rows.map((r) => r.createdAt).sort()[0] ?? null,
+        days,
       });
     },
 
@@ -420,21 +466,213 @@ export function makeHandler(db, {
       if (!shop) return json(404, { error: 'Shop not found' });
       const memberRows = [staffRow(shopId, userId), { pk: `USER#${userId}`, sk: `SHOP#${shopId}` }];
       const at = now().toISOString();
+      // A role change keeps the name the person gave when they joined.
       await db.send(new TransactWriteCommand({ TransactItems: [
         ...memberRows.map((Key) => role
-          ? { Put: { TableName: tenancyTable, Item: { ...Key, role, name: shop.name, addedBy: actor.id, addedAt: at } } }
+          ? { Update: {
+            TableName: tenancyTable, Key,
+            UpdateExpression: 'SET #r = :role, addedBy = if_not_exists(addedBy, :by), addedAt = if_not_exists(addedAt, :at)',
+            ExpressionAttributeNames: { '#r': 'role' }, ExpressionAttributeValues: { ':role': role, ':by': actor.id, ':at': at },
+          } }
           : { Delete: { TableName: tenancyTable, Key } }),
         audit(shopId, actor, 'staff', userId, { role }),
       ] }));
       return json(200, { shopId, userId, role });
     },
 
+    // The client makes the item id once, so a retried create returns the same item.
+    'POST /shops/{shopId}/items': async ({ params, body, actor }) => {
+      const fields = itemFields(body);
+      if (!UUID.test(body.id ?? '') || !fields || !isStock(body.stock)) {
+        return json(400, { error: `id (uuid), name (2-80 characters), price (0-${MAX_PRICE}) and stock (0-${MAX_STOCK}) are required` });
+      }
+      const shop = await get(tenancyTable, shopRow(params.shopId));
+      const at = now().toISOString();
+      const item = {
+        id: body.id, shopId: params.shopId, ...fields, pickupWindow: fields.pickupWindow || shop?.pickupWindow || '',
+        stock: body.stock, version: 0, active: true, confirmedAt: at,
+      };
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: [
+          { Put: { TableName: itemsTable, Item: item, ConditionExpression: 'attribute_not_exists(id)' } },
+          audit(params.shopId, actor, 'item-created', item.id, { name: item.name }),
+        ] }));
+        return json(201, item);
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        if (cancelled(err)[0] !== 'ConditionalCheckFailed') return json(503, { error: 'Busy, try again' });
+        const existing = await get(itemsTable, { id: item.id });
+        return existing?.shopId === params.shopId && existing.name === item.name ? json(200, existing) : json(409, { error: 'Item id already used' });
+      }
+    },
+
+    // Name, course, price, hours, and whether it is on sale. Stock has its own recount route.
+    'PUT /shops/{shopId}/items/{id}/details': async ({ params, body, actor }) => {
+      const fields = itemFields(body);
+      if (!fields || typeof body.active !== 'boolean' || !isStock(body.expectedVersion)) {
+        return json(400, { error: 'name, price, active (true or false) and expectedVersion are required' });
+      }
+      const item = isItemId(params.id) && await get(itemsTable, { id: params.id });
+      if (!item || shopOf(item) !== params.shopId) return json(404, { error: 'Item not found' });
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: [
+          { Update: {
+            TableName: itemsTable, Key: { id: item.id },
+            UpdateExpression: 'SET #n = :name, course = :course, price = :price, pickupWindow = :pickupWindow, active = :active, version = if_not_exists(version, :zero) + :one',
+            ConditionExpression: body.expectedVersion === 0 ? 'attribute_not_exists(version) OR version = :expected' : 'version = :expected',
+            ExpressionAttributeNames: { '#n': 'name' },
+            ExpressionAttributeValues: {
+              ...one, ':name': fields.name, ':course': fields.course, ':price': fields.price, ':pickupWindow': fields.pickupWindow,
+              ':active': body.active, ':expected': body.expectedVersion,
+            },
+          } },
+          audit(params.shopId, actor, 'item-updated', item.id, {
+            before: { name: item.name, price: item.price, active: item.active !== false },
+            after: { name: fields.name, price: fields.price, active: body.active },
+          }),
+        ] }));
+        return json(200, { ...item, ...fields, active: body.active, version: (item.version ?? 0) + 1 });
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        return cancelled(err)[0] === 'ConditionalCheckFailed'
+          ? json(409, { error: 'This item changed since you opened it. Refresh and try again.' }) : json(503, { error: 'Busy, try again' });
+      }
+    },
+
+    'PUT /shops/{shopId}': async ({ params, body, actor }) => {
+      const pickupWindow = body.pickupWindow ?? '';
+      if (!isText(body.name, 2, 80) || !isText(pickupWindow, 0, 80)) return json(400, { error: 'name (2-80 characters) is required' });
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: [
+          { Update: {
+            TableName: tenancyTable, Key: shopRow(params.shopId),
+            UpdateExpression: 'SET #n = :name, pickupWindow = :pickupWindow', ConditionExpression: 'attribute_exists(sk)',
+            ExpressionAttributeNames: { '#n': 'name' }, ExpressionAttributeValues: { ':name': body.name.trim(), ':pickupWindow': pickupWindow.trim() },
+          } },
+          audit(params.shopId, actor, 'shop-updated', params.shopId, { name: body.name.trim() }),
+        ] }));
+        return json(200, { id: params.shopId, name: body.name.trim(), pickupWindow: pickupWindow.trim() });
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        return cancelled(err)[0] === 'ConditionalCheckFailed' ? json(404, { error: 'Shop not found' }) : json(503, { error: 'Busy, try again' });
+      }
+    },
+
+    'GET /shops/{shopId}/staff': async ({ params }) => {
+      const rows = await readAll(QueryCommand, {
+        TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk AND begins_with(sk, :staff)',
+        ExpressionAttributeValues: { ':pk': `SHOP#${params.shopId}`, ':staff': 'STAFF#' },
+      });
+      return json(200, rows.map(({ sk, role, name = '', addedAt }) => ({ userId: sk.slice('STAFF#'.length), role, name, addedAt })));
+    },
+
+    // A single-use link the owner sends however they like. Only a digest of the token is stored.
+    'POST /shops/{shopId}/invites': async ({ params, body, actor }) => {
+      if (!ROLES.includes(body.role)) return json(400, { error: 'role must be owner or staff' });
+      const token = randomBytes(24).toString('base64url');
+      const at = now();
+      const expiresAt = new Date(at.getTime() + INVITE_DAYS * 86_400_000).toISOString();
+      await db.send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: tenancyTable, Item: {
+          pk: `INVITE#${digest(token)}`, sk: 'INVITE', shopId: params.shopId, role: body.role, createdBy: actor.id,
+          expiresAt, expires: Math.floor(Date.parse(expiresAt) / 1000),
+        } } },
+        audit(params.shopId, actor, 'invite', body.role),
+      ] }));
+      return json(201, { token, role: body.role, expiresAt });
+    },
+
+    'POST /invites/accept': async ({ body, actor }) => {
+      const name = body.name ?? '';
+      if (typeof body.token !== 'string' || !INVITE_TOKEN.test(body.token) || !isText(name, 0, 60)) {
+        return json(400, { error: 'A valid invite token is required, and a name of up to 60 characters' });
+      }
+      const key = { pk: `INVITE#${digest(body.token)}`, sk: 'INVITE' };
+      const at = now().toISOString();
+      const invite = await get(tenancyTable, key);
+      const gone = () => json(404, { error: 'This invite link has expired or was already used. Ask the shop for a new one.' });
+      if (!invite || invite.expiresAt <= at) return gone();
+      const shop = await get(tenancyTable, shopRow(invite.shopId));
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: [
+          { Delete: {
+            TableName: tenancyTable, Key: key, ConditionExpression: 'attribute_exists(pk) AND expiresAt > :now',
+            ExpressionAttributeValues: { ':now': at },
+          } },
+          { Put: {
+            TableName: tenancyTable, ConditionExpression: 'attribute_not_exists(sk)',
+            Item: { ...staffRow(invite.shopId, actor.id), role: invite.role, name: name.trim(), addedBy: invite.createdBy, addedAt: at },
+          } },
+          { Put: { TableName: tenancyTable, Item: { pk: `USER#${actor.id}`, sk: `SHOP#${invite.shopId}`, role: invite.role, addedAt: at } } },
+          audit(invite.shopId, actor, 'joined', actor.id, { role: invite.role }),
+        ] }));
+        return json(200, { shopId: invite.shopId, name: shop?.name ?? invite.shopId, role: invite.role });
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        const codes = cancelled(err);
+        if (codes[0] === 'ConditionalCheckFailed') return gone();
+        if (codes[1] === 'ConditionalCheckFailed') return json(409, { error: 'You’re already on this shop’s staff.' });
+        return json(503, { error: 'Busy, try again' });
+      }
+    },
+
+    // Newest first, 50 at a time. The cursor is checked so it can only page through this shop's log.
+    'GET /shops/{shopId}/audit': async ({ params, query }) => {
+      const pk = `SHOP#${params.shopId}`;
+      let ExclusiveStartKey;
+      if (query.cursor !== undefined) {
+        try {
+          const key = JSON.parse(Buffer.from(String(query.cursor), 'base64url').toString());
+          if (key?.pk !== pk || typeof key.sk !== 'string' || !key.sk.startsWith('AUDIT#') || Object.keys(key).length !== 2) throw new Error('bad cursor');
+          ExclusiveStartKey = key;
+        } catch {
+          return json(400, { error: 'Invalid cursor' });
+        }
+      }
+      const page = await db.send(new QueryCommand({
+        TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk AND begins_with(sk, :audit)',
+        ExpressionAttributeValues: { ':pk': pk, ':audit': 'AUDIT#' }, ScanIndexForward: false, Limit: 50, ExclusiveStartKey,
+      }));
+      return json(200, {
+        entries: (page.Items ?? []).map(({ sk, actor, action, target, at, pk: _pk, expires, ...detail }) => ({ id: sk, at, actor, action, target, detail })),
+        next: page.LastEvaluatedKey ? Buffer.from(JSON.stringify(page.LastEvaluatedKey)).toString('base64url') : null,
+      });
+    },
+
+    'GET /admin/shops': async () => {
+      const shops = await readAll(QueryCommand, {
+        TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'SHOP' },
+      });
+      return json(200, shops.map(({ sk, name, pickupWindow = '', status = 'active', plan = '', createdAt }) =>
+        ({ id: sk, name, pickupWindow, status, plan, createdAt })));
+    },
+
+    // Suspending a shop stops new reservations at once; staff keep their access.
+    'PUT /admin/shops/{shopId}': async ({ params, body, actor }) => {
+      if (!SHOP_STATUSES.includes(body.status)) return json(400, { error: `status must be one of ${SHOP_STATUSES.join(', ')}` });
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: [
+          { Update: {
+            TableName: tenancyTable, Key: shopRow(params.shopId), UpdateExpression: 'SET #st = :status',
+            ConditionExpression: 'attribute_exists(sk)', ExpressionAttributeNames: { '#st': 'status' },
+            ExpressionAttributeValues: { ':status': body.status },
+          } },
+          audit(params.shopId, actor, 'shop-status', params.shopId, { status: body.status }),
+        ] }));
+        return json(200, { id: params.shopId, status: body.status });
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        return cancelled(err)[0] === 'ConditionalCheckFailed' ? json(404, { error: 'Shop not found' }) : json(503, { error: 'Busy, try again' });
+      }
+    },
+
+    // ownerId is optional: without it, send the owner an invite link (POST /shops/{shopId}/invites).
     'POST /admin/shops': async ({ body, actor }) => {
       const { id, name, ownerId } = body;
       const pickupWindow = body.pickupWindow ?? '';
-      if (typeof id !== 'string' || !SHOP_ID.test(id) || typeof name !== 'string' || name.trim().length < 2 || name.length > 80
-        || !UUID.test(ownerId ?? '') || typeof pickupWindow !== 'string' || pickupWindow.length > 80) {
-        return json(400, { error: 'id (3-40 lowercase letters, digits, dashes), name, and ownerId are required' });
+      if (typeof id !== 'string' || !SHOP_ID.test(id) || !isText(name, 2, 80)
+        || (ownerId !== undefined && !UUID.test(ownerId)) || !isText(pickupWindow, 0, 80)) {
+        return json(400, { error: 'id (3-40 lowercase letters, digits, dashes) and name are required; ownerId must be an account id' });
       }
       const at = now().toISOString();
       try {
@@ -443,12 +681,12 @@ export function makeHandler(db, {
             TableName: tenancyTable, ConditionExpression: 'attribute_not_exists(sk)',
             Item: { ...shopRow(id), name: name.trim(), pickupWindow, status: 'trial', plan: 'trial', createdAt: at, createdBy: actor.id },
           } },
-          ...[staffRow(id, ownerId), { pk: `USER#${ownerId}`, sk: `SHOP#${id}` }].map((Key) => ({ Put: {
-            TableName: tenancyTable, Item: { ...Key, role: 'owner', name: name.trim(), addedBy: actor.id, addedAt: at },
+          ...(ownerId ? [staffRow(id, ownerId), { pk: `USER#${ownerId}`, sk: `SHOP#${id}` }] : []).map((Key) => ({ Put: {
+            TableName: tenancyTable, Item: { ...Key, role: 'owner', addedBy: actor.id, addedAt: at },
           } })),
-          audit(id, actor, 'shop-created', id, { ownerId }),
+          audit(id, actor, 'shop-created', id, ownerId ? { ownerId } : {}), // DynamoDB rejects undefined values
         ] }));
-        return json(201, { id, name: name.trim(), status: 'trial', ownerId });
+        return json(201, { id, name: name.trim(), status: 'trial', ...(ownerId ? { ownerId } : {}) });
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
         return cancelled(err)[0] === 'ConditionalCheckFailed' ? json(409, { error: 'That shop id is taken' }) : json(503, { error: 'Busy, try again' });
@@ -498,7 +736,7 @@ export function makeHandler(db, {
         // Someone with no role at this shop learns nothing about it, not even that it exists.
         if (!allowed) return role ? json(403, { error: 'Owner access is required.' }) : notFound();
       }
-      return await routes[routeKey]({ body, params, actor });
+      return await routes[routeKey]({ body, params, actor, query: event.queryStringParameters ?? {} });
     } catch (err) {
       if (TRANSIENT.has(err.name) || dependencyUnavailable(err)) return json(503, { error: 'Busy, try again' }, { 'retry-after': '2' });
       console.error(err);

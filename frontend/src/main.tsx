@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getItems, type Item } from './api';
-import { Shop } from './Shop';
 import { Student } from './Student';
 import { Marketplace } from './Marketplace';
 import { finishSignIn, isLoginCallback, marketplaceEnabled } from './marketplace-api';
@@ -15,9 +14,12 @@ export type Catalog = {
   refresh: () => Promise<void>;
 };
 
+// Shop staff tools load only when someone opens them, so students never download them.
+const Admin = lazy(() => import('./Admin'));
+
 function currentScreen() {
   if (marketplaceEnabled && /^#marketplace(\/|$)/.test(window.location.hash)) return 'marketplace';
-  return window.location.hash === '#shop' ? 'shop' : 'student';
+  return /^#(admin(\/|$)|shop$)/.test(window.location.hash) ? 'admin' : 'student';
 }
 
 function App() {
@@ -77,13 +79,13 @@ function App() {
         <nav aria-label="Main navigation" className="navigation">
           <a href="#" aria-current={screen === 'student' ? 'page' : undefined}>Find supplies</a>
           {marketplaceEnabled && <a href="#marketplace" aria-current={screen === 'marketplace' ? 'page' : undefined}>Marketplace</a>}
-          <a href="#shop" aria-current={screen === 'shop' ? 'page' : undefined}>Shop counter</a>
+          <a href="#admin" aria-current={screen === 'admin' ? 'page' : undefined}>For shops</a>
         </nav>
       </header>
       <main id="main" tabIndex={-1} className="shell content">
         {signInError && <p className="notice error" role="alert">{signInError}</p>}
         <div hidden={screen !== 'student'}><Student catalog={catalog} active={screen === 'student'} /></div>
-        {screen === 'shop' && <Shop catalog={catalog} />}
+        {screen === 'admin' && <Suspense fallback={<p role="status" className="hint">Loading the shop admin…</p>}><Admin catalog={catalog} /></Suspense>}
         {screen === 'marketplace' && <Marketplace />}
       </main>
     </>

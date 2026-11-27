@@ -32,6 +32,8 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   await initializeLocalTables(client, db, tables);
   const { Table } = await client.send(new DescribeTableCommand({ TableName: tables.items }));
   assert.deepEqual(Table.GlobalSecondaryIndexes.map(({ IndexName }) => IndexName), ['ByShop'], 'the older table gained its index');
+  const reservationIndexes = (await client.send(new DescribeTableCommand({ TableName: tables.reservations }))).Table.GlobalSecondaryIndexes;
+  assert.deepEqual(reservationIndexes.map(({ IndexName }) => IndexName).sort(), ['ByShopCreated', 'Queue']);
   const legacy = { id: randomUUID(), itemId: 'item-02', code: '123456', status: 'HELD', createdAt: '2026-11-27T08:00:00.000Z' };
   await db.send(new PutCommand({ TableName: tables.reservations, Item: legacy }));
   assert.equal((await migrateToTenancy(db, tables, { shopId: 'campus-shop', name: 'Campus shop', holdMinutes: 60 })).reservations, 1);
@@ -41,8 +43,8 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
     itemsTable: tables.items, reservationsTable: tables.reservations, tenancyTable: tables.tenancy, shopKey: 'legacy-key-123456',
     holdMinutes: 60, now: () => new Date(clock), actorFrom: (event) => event.actor,
   });
-  const call = async (routeKey, { as, params, body, headers = {} } = {}) => {
-    const res = await handler({ routeKey, actor: as, pathParameters: params, body: body && JSON.stringify(body), headers });
+  const call = async (routeKey, { as, params, body, query, headers = {} } = {}) => {
+    const res = await handler({ routeKey, actor: as, pathParameters: params, queryStringParameters: query, body: body && JSON.stringify(body), headers });
     return { status: res.statusCode, body: JSON.parse(res.body) };
   };
   const admin = { id: randomUUID(), platformAdmin: true };
@@ -51,7 +53,7 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   const reserve = (itemId, id = randomUUID(), as = student) => call('POST /reservations', { as, body: { id, itemId } });
 
   assert.equal((await call('PUT /shops/{shopId}/staff/{userId}', { as: admin, params: { shopId: 'campus-shop', userId: owner.id }, body: { role: 'owner' } })).status, 200);
-  assert.deepEqual((await call('GET /me', { as: owner })).body.shops, [{ shopId: 'campus-shop', name: 'Campus shop', role: 'owner' }]);
+  assert.deepEqual((await call('GET /me', { as: owner })).body.shops, [{ shopId: 'campus-shop', name: 'Campus shop', role: 'owner', status: 'active', pickupWindow: '' }]);
   const catalog = (await call('GET /items')).body;
   assert.equal(catalog.length, 12);
   assert.deepEqual(catalog.map(({ name }) => name), [...catalog.map(({ name }) => name)].sort(), 'the index returns the catalog by name');
@@ -89,6 +91,29 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   const recount = (expectedVersion) => call('PUT /shops/{shopId}/items/{id}', { as: owner, params: { shopId: 'campus-shop', id: 'item-01' }, body: { stock: 50, expectedVersion } });
   assert.equal((await recount(item.version - 1)).status, 409);
   assert.equal((await recount(item.version)).status, 200);
+
+  // Phase 2: catalog editing, invites, the activity log and windowed stats.
+  const shop = { shopId: 'campus-shop' };
+  const newItem = { id: randomUUID(), name: 'Drawing pencils', course: 'Engineering Drawing', price: 120, stock: 6 };
+  // The test clock stands still, so step it: entries made in the same millisecond have no set order.
+  clock += 60_000;
+  assert.equal((await call('POST /shops/{shopId}/items', { as: owner, params: shop, body: newItem })).status, 201);
+  clock += 60_000;
+  assert.equal((await call('PUT /shops/{shopId}/items/{id}/details', { as: owner, params: { ...shop, id: newItem.id },
+    body: { name: 'Drawing pencils, set of 6', course: '', price: 130, active: false, expectedVersion: 0 } })).status, 200);
+  assert.ok(!(await call('GET /items')).body.some(({ id: itemId }) => itemId === newItem.id), 'off-sale items leave the public catalog');
+  assert.equal((await call('GET /shops/{shopId}/catalog', { as: owner, params: shop })).body.find(({ id: itemId }) => itemId === newItem.id).name, 'Drawing pencils, set of 6');
+  clock += 60_000;
+  const { token } = (await call('POST /shops/{shopId}/invites', { as: owner, params: shop, body: { role: 'staff' } })).body;
+  clock += 60_000;
+  const clerk = { id: randomUUID() };
+  assert.equal((await call('POST /invites/accept', { as: clerk, body: { token, name: 'Clerk' } })).status, 200);
+  assert.equal((await call('POST /invites/accept', { as: { id: randomUUID() }, body: { token } })).status, 404, 'an invite works once');
+  assert.deepEqual((await call('GET /shops/{shopId}/staff', { as: owner, params: shop })).body.map(({ name }) => name).sort(), ['', 'Clerk']);
+  const activity = (await call('GET /shops/{shopId}/audit', { as: owner, params: shop })).body;
+  assert.deepEqual(activity.entries.slice(0, 3).map(({ action }) => action), ['joined', 'invite', 'item-updated'], 'newest first');
+  // Five holds made above, plus the migrated pilot hold from earlier the same day.
+  assert.equal((await call('GET /shops/{shopId}/stats', { as: owner, params: shop, query: { days: '1' } })).body.reservations, 6);
 
   assert.equal((await call('POST /admin/shops', { as: admin, body: { id: 'second-shop', name: 'Second shop', ownerId: randomUUID() } })).status, 201);
   assert.equal((await call('GET /shops/{shopId}/reservations', { as: owner, params: { shopId: 'second-shop' } })).status, 404);

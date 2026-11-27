@@ -20,7 +20,7 @@ export async function migrateToTenancy(db, tables, { shopId, name, pickupWindow 
   } catch (error) { if (error.name !== 'ConditionalCheckFailedException') throw error; }
   if (ownerId) {
     for (const Key of [{ pk: `SHOP#${shopId}`, sk: `STAFF#${ownerId}` }, { pk: `USER#${ownerId}`, sk: `SHOP#${shopId}` }]) {
-      await db.send(new PutCommand({ TableName: tables.tenancy, Item: { ...Key, role: 'owner', name, addedBy: 'migration', addedAt: at } }));
+      await db.send(new PutCommand({ TableName: tables.tenancy, Item: { ...Key, role: 'owner', addedBy: 'migration', addedAt: at } }));
     }
     counts.owner = 1;
   }

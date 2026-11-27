@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  ApiError, confirmStock, getMe, getShopItems, getShopReservations, getShopStats, holdAction,
+  ApiError, confirmStock, getCatalog, getMe, getShopReservations, getShopStats, holdAction,
   type Counter, type HoldAction, type Item, type Me, type Reservation, type ShopStats,
 } from './api';
 import { age, duration, groupCode, until } from './format';
@@ -29,7 +29,8 @@ function storeCounter(counter?: Counter) {
   }
 }
 
-// The app-wide catalog is the pilot shop's. A counter opened with an account shows its own shop's items.
+// The app-wide catalog is the pilot shop's. A counter opened with an account shows its own shop's items,
+// including any the owner has taken off sale (they still need counting).
 function useShopItems(shopId?: string): Catalog | undefined {
   const [state, setState] = useState({ shopId: '', items: [] as Item[], loading: false, error: '' });
   const latest = useRef(0);
@@ -38,7 +39,7 @@ function useShopItems(shopId?: string): Catalog | undefined {
     const request = ++latest.current;
     setState((current) => ({ ...current, loading: true }));
     try {
-      const items = await getShopItems(shopId);
+      const items = await getCatalog(shopId);
       if (request === latest.current) setState({ shopId, items, loading: false, error: '' });
     } catch (error) {
       if (request === latest.current) setState((current) => ({ ...current, loading: false, error: (error as Error).message }));
@@ -94,7 +95,8 @@ function CounterSignIn({ open, busy }: { open: (counter: Counter) => void; busy:
   );
 }
 
-export function Shop({ catalog: pilotCatalog }: { catalog: Catalog }) {
+// `shop` is the shop chosen in the admin console; the counter opens it directly.
+export function Shop({ catalog: pilotCatalog, shop }: { catalog: Catalog; shop?: { shopId: string; name: string } }) {
   const [counter, setCounter] = useState(readCounter);
   const catalog = useShopItems(counter && 'shopId' in counter ? counter.shopId : undefined) ?? pilotCatalog;
   const [entry, setEntry] = useState('');
@@ -182,8 +184,9 @@ export function Shop({ catalog: pilotCatalog }: { catalog: Catalog }) {
   }
 
   useEffect(() => {
-    if (counter) void loadHolds(counter);
-  }, []);
+    const chosen = shop ?? counter;
+    if (chosen) void loadHolds(chosen);
+  }, [shop?.shopId]);
 
   async function write(id: string, action: () => Promise<void>) {
     if (inFlight.current) return;
@@ -269,7 +272,7 @@ export function Shop({ catalog: pilotCatalog }: { catalog: Catalog }) {
     <>
       <div className="page-header page-header-split">
         <div>
-          <h1 className="page-title">Shop counter</h1>
+          <h2 className="counter-title">Counter</h2>
           <p className="hint">
             {unlocked && counter && 'name' in counter ? <>{counter.name}. </> : null}
             Set reserved units aside, hand them over against the code, and keep the shelf count honest.

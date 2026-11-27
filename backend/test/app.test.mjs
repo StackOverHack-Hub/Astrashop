@@ -266,6 +266,6 @@ test('pilot numbers count outcomes and median times', async () => {
   await sweep(); // b and c are past their 60-minute hold
   assert.deepEqual(await stats(), {
     reservations: 5, waitingToSetAside: 0, setAside: 2, collected: 2, expired: 2, released: 1,
-    medianMinutesToSetAside: 7.5, medianMinutesToCollect: 15, since: '2026-11-26T10:00:00.000Z',
+    medianMinutesToSetAside: 7.5, medianMinutesToCollect: 15, since: '2026-11-26T10:00:00.000Z', days: 90,
   });
 });
