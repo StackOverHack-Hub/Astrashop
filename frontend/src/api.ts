@@ -57,7 +57,11 @@ export type Me = { id: string; platformAdmin: boolean; moderator: boolean; shops
 export type StaffMember = { userId: string; role: Role; name: string; addedAt?: string };
 export type Invite = { token: string; role: Role; expiresAt: string };
 export type AuditEntry = { id: string; at: string; actor: string; action: string; target: string; detail: Record<string, unknown> };
-export type ShopSummary = { id: string; name: string; pickupWindow: string; status: ShopStatus; plan: string; createdAt: string };
+export type ShopSummary = {
+  id: string; name: string; pickupWindow: string; status: ShopStatus; plan: string; createdAt: string;
+  // Who set the status last: a platform admin by hand, or Razorpay billing.
+  statusSource: 'admin' | 'billing'; billingSubscription: string; usage: { month: string; collected: number }[];
+};
 export type ItemInput = { name: string; course: string; price: number; pickupWindow: string };
 // Staff open the counter with their account; the pilot shop can still use its shared key.
 export type Counter = { shopId: string; name: string } | { key: string };
@@ -171,8 +175,8 @@ export const getAudit = (shopId: string, cursor?: string) =>
   signed<{ entries: AuditEntry[]; next: string | null }>(shopPath(shopId, `/audit${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`));
 export const listShops = () => signed<ShopSummary[]>('/admin/shops');
 export const createShop = (shop: { id: string; name: string; pickupWindow: string }) => signed<ShopSummary>('/admin/shops', 'POST', shop);
-export const setShopStatus = (shopId: string, status: ShopStatus) =>
-  signed<{ id: string; status: ShopStatus }>(`/admin/shops/${encodeURIComponent(shopId)}`, 'PUT', { status });
+export const updateShopAdmin = (shopId: string, change: { status?: ShopStatus; plan?: string }) =>
+  signed<{ id: string; status?: ShopStatus; plan?: string }>(`/admin/shops/${encodeURIComponent(shopId)}`, 'PUT', change);
 export const inviteLink = (token: string) => `${location.origin}/#admin/join/${token}`;
 // data is the photo as base64 (resized in the browser first), or null to remove it.
 export const uploadPhoto = (shopId: string, id: string, data: string | null) =>

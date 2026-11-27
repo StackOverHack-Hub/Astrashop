@@ -44,6 +44,7 @@ The image uses runtime configuration. No frontend rebuild is needed to change fr
 | `AWS_REGION` | Region used by the AWS SDK. |
 | `ITEMS_TABLE`, `RESERVATIONS_TABLE`, `TENANCY_TABLE`, `MARKETPLACE_TABLE` | Existing DynamoDB tables from the SAM stack outputs. Run `backend/migrate-tenancy.mjs` once after upgrading from the single-shop version. |
 | `PHOTO_BUCKET`, `PHOTO_BASE_URL` | Optional item photos: the shop stack's `PhotoBucketName` and `PhotoBaseUrl` outputs. The task role needs `s3:PutObject` on `items/*`. Leave both unset to turn photo upload off. Locally, photos go to the `photo-data` volume and are served at `/photos/`. |
+| `RAZORPAY_WEBHOOK_SECRET` (or `_FILE`) | Optional Razorpay webhook secret for `POST /api/billing/razorpay`. Unset returns `501`. |
 | `DEFAULT_SHOP_ID` | The shop that owns pilot data and that the counter key opens. Defaults to `campus-shop`. |
 | `REDIS_HOST`, `REDIS_PORT` | Reachable private ElastiCache endpoint. |
 | `REDIS_TLS=true`, `REDIS_CLUSTER` | TLS and the cache's cluster mode. |

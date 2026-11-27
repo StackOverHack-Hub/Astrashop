@@ -55,7 +55,8 @@ export function containerConfig(env = process.env) {
     if (!/^[\w.-]{3,255}$/.test(value)) throw new Error(`Invalid ${name} table name`);
   }
   return {
-    local, authMode, region, shopKey, defaultShopId, tables, photos, allowedOrigin, loginOrigin, clientId, poolId,
+    local, authMode, region, shopKey, defaultShopId, tables, photos,
+    razorpaySecret: secret(env, 'RAZORPAY_WEBHOOK_SECRET') || undefined, allowedOrigin, loginOrigin, clientId, poolId,
     port: integer(env.PORT, 8080, 1, 65535, 'PORT'), host: env.HOST ?? '0.0.0.0',
     holdMinutes: integer(env.HOLD_MINUTES, 1440, 1, 525600, 'HOLD_MINUTES'),
     testUsers: local ? integer(env.LOCAL_TEST_USERS, 0, 0, 128, 'LOCAL_TEST_USERS') : 0,

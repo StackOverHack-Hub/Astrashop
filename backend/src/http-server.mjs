@@ -13,10 +13,12 @@ export const shopRoutes = [
   'GET /shops/{shopId}/catalog', 'POST /shops/{shopId}/items', 'PUT /shops/{shopId}/items/{id}/details', 'PUT /shops/{shopId}',
   'GET /shops/{shopId}/staff', 'POST /shops/{shopId}/invites', 'POST /invites/accept', 'GET /shops/{shopId}/audit',
   'GET /admin/shops', 'PUT /admin/shops/{shopId}',
-  'GET /shops', 'GET /me/reservations', 'PUT /shops/{shopId}/items/{id}/photo',
+  'GET /shops', 'GET /me/reservations', 'PUT /shops/{shopId}/items/{id}/photo', 'POST /billing/razorpay',
 ];
-// Photo uploads carry a resized image as base64; every other request stays small.
-export const bodyLimit = (routeKey) => routeKey === 'PUT /shops/{shopId}/items/{id}/photo' ? 1_000_000 : 8192;
+const photoRoute = 'PUT /shops/{shopId}/items/{id}/photo';
+// Photo uploads carry a resized image as base64 and need a sign-in before they are read; Razorpay's
+// webhooks are a few KB and carry their own signature. Every other request stays small.
+export const bodyLimit = (routeKey) => routeKey === photoRoute ? 1_000_000 : routeKey === 'POST /billing/razorpay' ? 32_768 : 8192;
 const routes = [
   ...shopRoutes,
   'GET /marketplace/listings', 'POST /marketplace/listings', 'GET /marketplace/mine',
@@ -136,7 +138,7 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
           return json(401, 'Sign in again to continue.');
         }
       }
-      if (limit > 8192 && !claims) { req.resume(); return json(401, 'Sign in to continue.'); }
+      if (route.routeKey === photoRoute && !claims) { req.resume(); return json(401, 'Sign in to continue.'); }
       if (Number(req.headers['content-length']) > limit) {
         req.resume();
         return json(413, 'Request is too large.');
@@ -167,7 +169,10 @@ export function createHttpServer({ shop, marketplace, verify, readiness = async 
         requestContext: { http: { sourceIp } },
       };
       if (claims) event.requestContext.authorizer = { jwt: { claims } };
+      const started = performance.now();
       const out = await (pathname.startsWith('/marketplace/') ? marketplace : shop)(event);
+      // One line per API request: the route pattern, never ids, tokens or bodies.
+      console.info(JSON.stringify({ event: 'request', route: route.routeKey, status: out.statusCode, ms: Math.round(performance.now() - started) }));
       if (!res.destroyed) {
         res.writeHead(out.statusCode, { ...security, ...out.headers, ...cors, 'cache-control': 'no-store' });
         res.end(out.body);

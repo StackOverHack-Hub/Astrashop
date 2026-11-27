@@ -1,7 +1,8 @@
-import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dependencyUnavailable } from './dependency-errors.mjs';
 import { digest, signedInUser } from './marketplace-shared.mjs';
 import { photoTypes, s3Photos } from './photo-store.mjs';
+import { emfMetrics } from './metrics.mjs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient, QueryCommand, GetCommand, TransactWriteCommand,
@@ -23,6 +24,14 @@ const photoKind = (bytes) => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] 
 const MAX_PRICE = 100000;
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{32}$/;
 const SHOP_STATUSES = ['trial', 'active', 'suspended'];
+// A Razorpay subscription's own status decides the shop's: paying shops are active, stopped ones are
+// suspended. pending, authenticated and created leave the shop as it is while Razorpay retries or starts.
+const BILLING_STATUS = { active: 'active', halted: 'suspended', cancelled: 'suspended', completed: 'suspended', paused: 'suspended', expired: 'suspended' };
+// While a shop is suspended its owners can't change it; the counter still finishes existing pickups.
+const SUSPENDED_BLOCKS = new Set([
+  'POST /shops/{shopId}/items', 'PUT /shops/{shopId}/items/{id}/details', 'PUT /shops/{shopId}/items/{id}/photo',
+  'POST /shops/{shopId}/invites', 'PUT /shops/{shopId}', 'PUT /shops/{shopId}/staff/{userId}',
+]);
 const ROLES = ['owner', 'staff'];
 // Plain text a person typed: trimmed length within bounds and no control characters.
 const isText = (value, min, max) => typeof value === 'string' && value.trim().length >= min && value.length <= max
@@ -53,6 +62,7 @@ const view = ({ queueShop, studentId, ...reservation }) => reservation;
 // Shop routes as the people who use them: anyone, a signed-in student, the shop's staff or owner,
 // or a platform admin. A route that is not listed here does not exist.
 const access = {
+  'POST /billing/razorpay': 'public', // signed by Razorpay; checked in the route
   'GET /shops': 'public',
   'GET /shops/{shopId}/items': 'public',
   'GET /me/reservations': 'signedIn',
@@ -90,7 +100,8 @@ export function shopActor(event) {
 
 export function makeHandler(db, {
   itemsTable, reservationsTable, tenancyTable, shopKey, defaultShopId = 'campus-shop',
-  holdMinutes = 1440, maxHolds = 3, actorFrom = shopActor, now = () => new Date(), photos,
+  holdMinutes = 1440, maxHolds = 3, actorFrom = shopActor, now = () => new Date(), photos, razorpaySecret,
+  emit = () => {},
 }) {
   const withPhoto = (item) => item.photoKey && photos ? { ...item, photoUrl: `${photos.baseUrl}/${item.photoKey}` } : item;
   // shortcut: the shared counter key from the single-shop pilot still opens that shop's counter.
@@ -156,6 +167,11 @@ export function makeHandler(db, {
         ExpressionAttributeValues: one,
       } }] : []),
       ...(actor ? [audit(shopOf(r), actor, to.toLowerCase(), r.id)] : []),
+      // Pickups per shop per month, the basis for a per-pickup fee.
+      ...(to === 'COLLECTED' ? [{ Update: {
+        TableName: tenancyTable, Key: { pk: `SHOP#${shopOf(r)}`, sk: `USAGE#${when.slice(0, 7)}` },
+        UpdateExpression: 'SET collected = if_not_exists(collected, :zero) + :one', ExpressionAttributeValues: one,
+      } }] : []),
     ];
     try {
       await db.send(new TransactWriteCommand({ TransactItems: items }));
@@ -190,6 +206,7 @@ export function makeHandler(db, {
         try {
           await endHold(r, 'EXPIRED');
           counts.expired += 1;
+          emit('Expired', shopId);
         } catch (err) {
           if (err.name !== 'TransactionCanceledException') throw err;
           const codes = cancelled(err);
@@ -204,6 +221,7 @@ export function makeHandler(db, {
       }
     }
     console.info(JSON.stringify({ event: 'holds_expired', ...counts }));
+    emit('SweepRun'); // the heartbeat alarm fires when this stops arriving
     // Fail the run so FunctionErrorsAlarm fires; the failed holds stay HELD and are retried.
     if (counts.failed > 0) throw new Error(`${counts.failed} hold(s) could not expire; see hold_expiry_failed logs`);
     return counts;
@@ -347,6 +365,7 @@ export function makeHandler(db, {
             } },
           ],
         }));
+        emit('ReservationCreated', shopId);
         return json(201, view(reservation));
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
@@ -357,6 +376,7 @@ export function makeHandler(db, {
         const codes = cancelled(err);
         if (codes[0] === 'ConditionalCheckFailed') return json(409, { error: 'Out of stock' });
         if (codes[2] === 'ConditionalCheckFailed') {
+          emit('HoldLimitHit', shopId);
           return json(409, { code: 'HOLD_LIMIT', error: `You already have ${maxHolds} items on hold at this shop. Collect one before reserving another.` });
         }
         if (codes[3] === 'ConditionalCheckFailed') return json(403, { error: 'This shop is not taking reservations right now.' });
@@ -495,6 +515,7 @@ export function makeHandler(db, {
       if (!r) return notFound();
       try {
         await endHold(r, 'COLLECTED', { actor, stamp: 'collectedAt' });
+        emit('Collected', params.shopId);
         return json(200, { id: r.id, status: 'COLLECTED' });
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
@@ -701,27 +722,101 @@ export function makeHandler(db, {
       });
     },
 
+    // Every shop with its plan, where its status came from, and pickups in the last three months.
     'GET /admin/shops': async () => {
       const shops = await readAll(QueryCommand, {
         TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'SHOP' },
       });
-      return json(200, shops.map(({ sk, name, pickupWindow = '', status = 'active', plan = '', createdAt }) =>
-        ({ id: sk, name, pickupWindow, status, plan, createdAt })));
+      return json(200, await Promise.all(shops.map(async ({ sk, name, pickupWindow = '', status = 'active', plan = '', statusSource = 'admin', billingSubscription = '', createdAt }) => {
+        const usage = await db.send(new QueryCommand({
+          TableName: tenancyTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk AND begins_with(sk, :usage)',
+          ExpressionAttributeValues: { ':pk': `SHOP#${sk}`, ':usage': 'USAGE#' }, ScanIndexForward: false, Limit: 3,
+        }));
+        return {
+          id: sk, name, pickupWindow, status, plan, statusSource, billingSubscription, createdAt,
+          usage: (usage.Items ?? []).map(({ sk: month, collected = 0 }) => ({ month: month.slice('USAGE#'.length), collected })),
+        };
+      })));
+    },
+
+    // Razorpay subscription webhooks. Signed with the webhook secret; each event is recorded once in an
+    // append-only ledger. A shop's subscription is linked by the note shopId when the subscription is made.
+    'POST /billing/razorpay': async ({ body, raw, headers }) => {
+      if (!razorpaySecret) return json(501, { error: 'Billing is not set up on this server.' });
+      const given = Buffer.from(String(headers['x-razorpay-signature'] ?? ''));
+      const want = Buffer.from(createHmac('sha256', razorpaySecret).update(raw).digest('hex'));
+      if (given.length !== want.length || !timingSafeEqual(given, want)) {
+        console.warn(JSON.stringify({ event: 'billing_signature_rejected' }));
+        return json(401, { error: 'Invalid signature' });
+      }
+      if (typeof body.event !== 'string') return json(400, { error: 'Not a Razorpay event' });
+      const subscription = body.payload?.subscription?.entity ?? {};
+      const shopId = subscription.notes?.shopId;
+      // The event id header isn't covered by the signature: use it only if it looks like one.
+      const headerId = String(headers['x-razorpay-event-id'] ?? '');
+      const eventId = /^[A-Za-z0-9_-]{1,100}$/.test(headerId) ? headerId : digest(raw.toString());
+      const at = now();
+      const eventAt = Number.isSafeInteger(body.created_at) ? new Date(body.created_at * 1000).toISOString() : at.toISOString();
+      const shop = typeof shopId === 'string' && SHOP_ID.test(shopId) ? await get(tenancyTable, shopRow(shopId)) : undefined;
+      const status = BILLING_STATUS[subscription.status];
+      // Billing reopens only a shop that billing suspended. One suspended by an admin, or before billing
+      // existed (no source recorded), stays suspended until a person lifts it.
+      const apply = shop && status && !(shop.status === 'suspended' && shop.statusSource !== 'billing');
+      const record = [
+        { Put: {
+          TableName: tenancyTable, ConditionExpression: 'attribute_not_exists(pk)',
+          Item: { pk: `BILLING-EVENT#${digest(eventId)}`, sk: 'EVENT', at: at.toISOString(), expires: Math.floor(at.getTime() / 1000) + 90 * 86_400 },
+        } },
+        { Put: { TableName: tenancyTable, Item: {
+          pk: shop ? `SHOP#${shopId}` : 'BILLING#UNMATCHED', sk: `BILLING#${eventAt}#${eventId}`,
+          event: body.event, eventId, subscriptionId: String(subscription.id ?? ''), planId: String(subscription.plan_id ?? ''),
+          subscriptionStatus: String(subscription.status ?? ''), at: at.toISOString(),
+        } } },
+      ];
+      // Events can arrive out of order: only a newer event than the last one applied changes the status,
+      // and only if the status hasn't been changed by someone else since it was read.
+      const change = apply && { Update: {
+        TableName: tenancyTable, Key: shopRow(shopId),
+        UpdateExpression: 'SET #st = :status, statusSource = :billing, billingEventAt = :eventAt, billingSubscription = :subscription',
+        ConditionExpression: '#st = :seen AND attribute_not_exists(billingEventAt) OR #st = :seen AND billingEventAt <= :eventAt',
+        ExpressionAttributeNames: { '#st': 'status' },
+        ExpressionAttributeValues: { ':status': status, ':billing': 'billing', ':eventAt': eventAt, ':subscription': String(subscription.id ?? ''), ':seen': shop.status },
+      } };
+      try {
+        await db.send(new TransactWriteCommand({ TransactItems: change ? [...record, change] : record }));
+      } catch (err) {
+        if (err.name !== 'TransactionCanceledException') throw err;
+        const codes = cancelled(err);
+        if (codes[0] === 'ConditionalCheckFailed') return json(200, { received: true, duplicate: true });
+        if (codes[2] !== 'ConditionalCheckFailed') throw err;
+        console.info(JSON.stringify({ event: 'billing_status_skipped', shopId, reason: 'stale or changed' }));
+        await db.send(new TransactWriteCommand({ TransactItems: record }));
+        return json(200, { received: true, shopId, status: null });
+      }
+      if (!shop) console.warn(JSON.stringify({ event: 'billing_unmatched', eventId }));
+      return json(200, { received: true, shopId: shop ? shopId : null, status: apply ? status : null });
     },
 
     // Suspending a shop stops new reservations at once; staff keep their access.
+    // { status } and/or { plan }. A status set here is marked as the admin's, so billing never undoes it.
     'PUT /admin/shops/{shopId}': async ({ params, body, actor }) => {
-      if (!SHOP_STATUSES.includes(body.status)) return json(400, { error: `status must be one of ${SHOP_STATUSES.join(', ')}` });
+      const { status, plan } = body;
+      if ((status === undefined && plan === undefined) || (status !== undefined && !SHOP_STATUSES.includes(status))
+        || (plan !== undefined && !isText(plan, 0, 40))) {
+        return json(400, { error: `Send status (${SHOP_STATUSES.join(', ')}) and/or plan (up to 40 characters)` });
+      }
+      const sets = [...(status !== undefined ? ['#st = :status', 'statusSource = :admin'] : []), ...(plan !== undefined ? ['#plan = :plan'] : [])];
       try {
         await db.send(new TransactWriteCommand({ TransactItems: [
           { Update: {
-            TableName: tenancyTable, Key: shopRow(params.shopId), UpdateExpression: 'SET #st = :status',
-            ConditionExpression: 'attribute_exists(sk)', ExpressionAttributeNames: { '#st': 'status' },
-            ExpressionAttributeValues: { ':status': body.status },
+            TableName: tenancyTable, Key: shopRow(params.shopId), UpdateExpression: `SET ${sets.join(', ')}`,
+            ConditionExpression: 'attribute_exists(sk)',
+            ExpressionAttributeNames: { ...(status !== undefined ? { '#st': 'status' } : {}), ...(plan !== undefined ? { '#plan': 'plan' } : {}) },
+            ExpressionAttributeValues: { ...(status !== undefined ? { ':status': status, ':admin': 'admin' } : {}), ...(plan !== undefined ? { ':plan': plan.trim() } : {}) },
           } },
-          audit(params.shopId, actor, 'shop-status', params.shopId, { status: body.status }),
+          audit(params.shopId, actor, 'shop-status', params.shopId, { ...(status !== undefined ? { status } : {}), ...(plan !== undefined ? { plan: plan.trim() } : {}) }),
         ] }));
-        return json(200, { id: params.shopId, status: body.status });
+        return json(200, { id: params.shopId, ...(status !== undefined ? { status } : {}), ...(plan !== undefined ? { plan: plan.trim() } : {}) });
       } catch (err) {
         if (err.name !== 'TransactionCanceledException') throw err;
         return cancelled(err)[0] === 'ConditionalCheckFailed' ? json(404, { error: 'Shop not found' }) : json(503, { error: 'Busy, try again' });
@@ -782,9 +877,11 @@ export function makeHandler(db, {
       if (!actor?.id) return json(401, { error: 'Sign in to continue.' });
     }
 
+    // The exact bytes received: the billing webhook's signature covers them, not the parsed JSON.
+    const rawBytes = Buffer.from(event.body ?? '', event.isBase64Encoded ? 'base64' : 'utf8');
     let body;
     try {
-      const raw = event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString() : event.body;
+      const raw = event.isBase64Encoded ? rawBytes.toString() : event.body;
       body = (raw ? JSON.parse(raw) : null) ?? {};
       if (typeof body !== 'object' || Array.isArray(body)) throw new Error('not an object');
     } catch {
@@ -798,7 +895,10 @@ export function makeHandler(db, {
         // Someone with no role at this shop learns nothing about it, not even that it exists.
         if (!allowed) return role ? json(403, { error: 'Owner access is required.' }) : notFound();
       }
-      return await routes[routeKey]({ body, params, actor, query: event.queryStringParameters ?? {} });
+      if (SUSPENDED_BLOCKS.has(routeKey) && !actor.platformAdmin && (await get(tenancyTable, shopRow(params.shopId)))?.status === 'suspended') {
+        return json(403, { error: 'This shop is suspended, so its catalog and staff can’t be changed. Contact Astrashop to restore it.' });
+      }
+      return await routes[routeKey]({ body, params, actor, query: event.queryStringParameters ?? {}, raw: rawBytes, headers: event.headers ?? {} });
     } catch (err) {
       if (TRANSIENT.has(err.name) || dependencyUnavailable(err)) return json(503, { error: 'Busy, try again' }, { 'retry-after': '2' });
       console.error(err);
@@ -815,4 +915,6 @@ export const handler = makeHandler(DynamoDBDocumentClient.from(new DynamoDBClien
   defaultShopId: process.env.DEFAULT_SHOP_ID || undefined,
   holdMinutes: Number(process.env.HOLD_MINUTES) || 1440,
   photos: process.env.PHOTO_BUCKET ? s3Photos({ bucket: process.env.PHOTO_BUCKET, baseUrl: process.env.PHOTO_BASE_URL }) : undefined,
+  razorpaySecret: process.env.RAZORPAY_WEBHOOK_SECRET || undefined,
+  emit: emfMetrics(),
 });

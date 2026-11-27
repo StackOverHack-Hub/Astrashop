@@ -581,3 +581,4 @@ textarea.field-control { resize: vertical; }
 .photo-field label.text-button { width: auto; cursor: pointer; }
 .photo-field label.text-button:focus-within { outline: 3px solid var(--blue); outline-offset: 2px; }
 .photo-field .notice { flex-basis: 100%; }
+.plan-field { width: 10rem; }

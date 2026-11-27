@@ -1,6 +1,6 @@
 # Astrashop production design
 
-Status: Phases 1-3 built, 27 Nov 2026 (see sections [13](#13-phase-1-as-built), [14](#14-phase-2-as-built) and [15](#15-phase-3-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
+Status: all four phases built, 27 Nov 2026 (see sections [13](#13-phase-1-as-built) to [16](#16-phase-4-as-built)). It builds on the [gap analysis](GAP-ANALYSIS.md).
 
 **Decisions taken**
 - Sell to campus shops: a monthly fee per shop, with a per-reservation fee as an option.
@@ -268,7 +268,7 @@ Each phase ships on its own and keeps CI green.
 | **1. Identity and tenancy** | Tenancy table, `shopId` backfill, indexes (removes the scans), `GET /me`, the `authorize()` role table, staff and owner sign-in with the legacy key behind a flag, sign-in to reserve plus the hold cap, Redis limits on shop routes, audit log, cross-tenant tests.<br>**Local parity**, so the README's "no AWS account needed" stays true and the Docker CI keeps passing: `fake-db.mjs` gains `QueryCommand` on indexes (today it supports Scan, Get, Update and transactions only), `container-bootstrap.mjs` creates the indexes and the Tenancy table, and demo identities gain staff, owner and platform-admin accounts. This is the largest phase, and nothing in it is visible to customers. | Nothing |
 | **2. Admin console** (built) | `/admin` with counter, catalog, staff invites, activity, moderation queue, shop onboarding | Phase 1 |
 | **3. Customer experience** (built) | Item photos (upload in the catalog, S3 + CDN, display on cards), path routes, search-first home, word search, item page, My passes, shop picker, loading and empty states | Phase 1 for My passes and sign-in. The routing, home and cards can start alongside Phase 1 on a separate branch. Expect a small merge in `Student.tsx` and `api.ts`, where Phase 1 adds sign-in to reserve. |
-| **4. Money and operations** | Plan and status enforcement, Razorpay webhooks, usage metering, metrics and alarms per shop, stack merge | Phases 1 and 2 |
+| **4. Money and operations** (built) | Plan and status enforcement, Razorpay webhooks, usage metering, metrics and alarms per shop, stack merge | Phases 1 and 2 |
 
 ## 12. What to revisit as it grows
 
@@ -422,3 +422,48 @@ Built 27 Nov 2026 on branch `production/phase-3-storefront`.
 - "From students" shows the first three matches in word order, not ranked by relevance.
 - On a phone already used before this version, the signed-out view still shows passes saved under the old shared key until they expire. Signed-in views are separate.
 - Photo upload has only been tested in desktop Chromium, not on a real phone or in Safari. The Safari path retries the photo read without the orientation option.
+
+## 16. Phase 4 as built
+
+Built 27 Nov 2026 on branch `production/phase-4-operations`.
+
+**Billing (Razorpay subscriptions)**
+- `POST /billing/razorpay` checks `X-Razorpay-Signature`, an HMAC-SHA256 of the exact request bytes made with the webhook secret, in constant time.
+- Each subscription is linked to a shop by the note `shopId`.
+- The subscription's own status (not the event name) decides the shop's. `active` opens it. `halted`, `cancelled`, `completed`, `paused` and `expired` suspend it. `pending`, `authenticated` and `created` change nothing, which gives a grace period while Razorpay retries a payment.
+- Each event is written once, keyed by `x-razorpay-event-id`, to an append-only ledger (`BILLING#<event time>#<id>` under the shop, or `BILLING#UNMATCHED`), with no expiry.
+- The status changes only if the event is newer than the last one applied and the status hasn't changed since it was read, so late or duplicated deliveries can't undo a newer state.
+- A suspension set by a platform admin (`statusSource: admin`) is never lifted by billing.
+- Handled in the request rather than through a queue: the work is three writes, Razorpay retries on any non-2xx response, and the ledger makes retries safe.
+
+**Usage metering:** each collect adds one to `USAGE#<yyyy-mm>` under its shop, in the same transaction that marks the pickup collected, so the count can't drift from real pickups. Platform admins see the last three months per shop.
+
+**Plans and suspension**
+- Platform admins set a plan name, and a status that is marked as theirs.
+- Suspended shops take no new reservations and drop out of `GET /shops`. Their owners can't change the catalog, photos, invites, staff or shop details. The counter still finishes existing pickups, so no student is left stranded.
+
+**Operations**
+- Embedded-metric lines are written straight to stdout so Lambda's JSON log format passes them through. Metrics are published in total and per shop: `ReservationCreated`, `HoldLimitHit`, `Collected`, `Expired`, and the `SweepRun` heartbeat.
+- New alarms: expiry heartbeat, hold-count mismatch, and bad billing signatures on the shop stack, plus rate limiter unavailable on the marketplace stack.
+- The container logs one `request` line per API call (route pattern, status, ms).
+
+**Verification**
+- 89 backend unit tests and 8 client tests pass. The Docker stress and recovery run had 0 failures across all five outage checks.
+- The integration tests pass on DynamoDB Local. They cover the webhook's combined condition, duplicate events, a refused stale event, and the pickup counter.
+- A throwaway Docker stack accepted signed webhooks with non-ASCII notes through the container's HTTP server, suspended and restored the shop, refused an unsigned event, accepted 20 KB and refused anything over 32 KB.
+- The browser check covered the plan saved from the Shops screen, and pickups per month shown there.
+
+**Changes from the plan**
+
+| Planned | Built | Why |
+|---|---|---|
+| Webhook → SQS → Lambda | Handled in the request | Three writes; Razorpay retries non-2xx responses, and the event ledger makes retries harmless |
+| Merge the two stacks | Two stacks kept | Moving live Cognito users and retained tables between stacks is a risky one-way migration with no visible gain. Identity is already shared. |
+| Plan enforcement by feature | Status enforcement; the plan is a label | No plan-specific features exist yet. Trial expiry is left to platform admins and billing. |
+
+**Known limits:**
+- Container metrics need the CloudWatch agent or FireLens to become CloudWatch metrics. On Lambda, extraction alongside `LogFormat: JSON` is unverified: confirm `Astrashop/SweepRun` appears after deploy, or the heartbeat alarm will go red.
+- Billing reopens only shops that billing suspended. Shops suspended by an admin, or before Phase 4 (no source recorded), need a person to lift the suspension.
+- Per-shop metric dimensions cost a few custom metrics per shop each month.
+- Creating Razorpay subscriptions (with the `shopId` note) is done in the Razorpay dashboard or API, not from Astrashop.
+- No Razorpay test-mode event has been sent to a deployed stack. The webhook payloads in the tests follow Razorpay's documented subscription shape.

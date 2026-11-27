@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
   acceptInvite, createInvite, createItem, createShop, getAudit, getCatalog, getMe, getStaff, inviteLink, listShops,
-  resizePhoto, setShopStatus, setStaffRole, updateItem, updateShop, uploadPhoto,
+  resizePhoto, setStaffRole, updateItem, updateShop, updateShopAdmin, uploadPhoto,
   type AuditEntry, type Invite, type Item, type Me, type Membership, type Role, type ShopStatus, type ShopSummary, type StaffMember,
 } from './api';
 import { age, until } from './format';
@@ -304,7 +304,7 @@ const describe = (entry: AuditEntry, itemName: (id: string) => string, who: (id:
     case 'joined': return <>joined as {d.role}</>;
     case 'shop-created': return 'opened the shop';
     case 'shop-updated': return <>renamed the shop to {d.name}</>;
-    case 'shop-status': return <>set the shop to {d.status}</>;
+    case 'shop-status': return d.status ? <>set the shop to {d.status}</> : <>set the plan to {d.plan}</>;
     default: return entry.action;
   }
 };
@@ -387,6 +387,17 @@ function ModerationSection() {
   );
 }
 
+const monthName = (month: string) => new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-IN', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+
+// The plan's name as the platform sells it, e.g. "Campus monthly"; saved when the field loses focus.
+function PlanField({ shop, disabled, save }: { shop: ShopSummary; disabled: boolean; save: (plan: string) => Promise<void> }) {
+  const [plan, setPlan] = useState(shop.plan);
+  return (
+    <input className="field-control plan-field" aria-label={`Plan of ${shop.name}`} placeholder="Plan" maxLength={40} value={plan} disabled={disabled}
+      onChange={(event) => setPlan(event.target.value)} onBlur={() => { if (plan.trim() !== shop.plan) void save(plan); }} />
+  );
+}
+
 function ShopsSection() {
   const shops = useLoad(listShops, []);
   const [form, setForm] = useState({ id: '', name: '', pickupWindow: '' });
@@ -400,15 +411,23 @@ function ShopsSection() {
   };
   return (
     <section className="panel" aria-labelledby="shops-heading">
-      <div className="panel-head"><h2 id="shops-heading">Shops</h2><p className="hint">Open a shop, send its owner an invite link, and pause it if it stops paying. A suspended shop takes no new reservations.</p></div>
+      <div className="panel-head"><h2 id="shops-heading">Shops</h2><p className="hint">
+        Open a shop, send its owner an invite link, and set its plan. Razorpay billing keeps the status in step with the
+        subscription; a suspension you set here stays until you lift it. A suspended shop takes no new reservations and its owners can’t change it.
+      </p></div>
       <Notice error={shops.error || error} />
       <ul className="admin-list">
         {shops.data?.map((shop: ShopSummary) => (
           <li key={shop.id}>
             <div className="admin-row">
-              <div><p className="admin-name">{shop.name}</p><p className="hint">{shop.id}{shop.pickupWindow && ` · ${shop.pickupWindow}`}</p></div>
+              <div>
+                <p className="admin-name">{shop.name}{shop.statusSource === 'billing' && <span className="tag">billing</span>}</p>
+                <p className="hint">{shop.id}{shop.pickupWindow && ` · ${shop.pickupWindow}`}</p>
+                <p className="hint">Pickups: {shop.usage.length ? shop.usage.map(({ month, collected }) => `${monthName(month)} ${collected}`).join(' · ') : 'none yet'}</p>
+              </div>
+              <PlanField shop={shop} disabled={!!busy} save={(plan) => act(shop.id, async () => { await updateShopAdmin(shop.id, { plan }); shops.reload(); })} />
               <select className="field-control" aria-label={`Status of ${shop.name}`} value={shop.status} disabled={!!busy}
-                onChange={(event) => void act(shop.id, async () => { await setShopStatus(shop.id, event.target.value as ShopStatus); shops.reload(); })}>
+                onChange={(event) => void act(shop.id, async () => { await updateShopAdmin(shop.id, { status: event.target.value as ShopStatus }); shops.reload(); })}>
                 <option value="trial">trial</option><option value="active">active</option><option value="suspended">suspended</option>
               </select>
               <button type="button" className="text-button" disabled={!!busy}
@@ -493,7 +512,7 @@ export default function Admin() {
       <header className="page-header page-header-split">
         <div>
           <h1 className="page-title">Shop admin</h1>
-          <p className="hint">{shop ? <>{shop.name}, you’re {shop.role === 'owner' ? 'an owner' : 'staff'}{shop.status === 'suspended' && '. This shop is suspended and takes no new reservations'}.</> : 'Run the counter, the catalog and your team.'}</p>
+          <p className="hint">{shop ? <>{shop.name}, you’re {shop.role === 'owner' ? 'an owner' : 'staff'}{shop.status === 'suspended' && '. This shop is suspended: it takes no new reservations, and its catalog and staff can’t be changed until Astrashop restores it'}.</> : 'Run the counter, the catalog and your team.'}</p>
         </div>
         <div className="admin-account">
           {shops.length > 1 && (

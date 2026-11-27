@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { CreateTableCommand, DeleteTableCommand, DescribeTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
@@ -43,9 +43,10 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   const handler = makeHandler(db, {
     itemsTable: tables.items, reservationsTable: tables.reservations, tenancyTable: tables.tenancy, shopKey: 'legacy-key-123456',
     holdMinutes: 60, now: () => new Date(clock), actorFrom: (event) => event.actor, photos: memoryPhotos('https://photos.example'),
+    razorpaySecret: 'whsec_integration',
   });
   const call = async (routeKey, { as, params, body, query, headers = {} } = {}) => {
-    const res = await handler({ routeKey, actor: as, pathParameters: params, queryStringParameters: query, body: body && JSON.stringify(body), headers });
+    const res = await handler({ routeKey, actor: as, pathParameters: params, queryStringParameters: query, body: typeof body === 'string' ? body : body && JSON.stringify(body), headers });
     return { status: res.statusCode, body: JSON.parse(res.body) };
   };
   const admin = { id: randomUUID(), platformAdmin: true };
@@ -127,6 +128,23 @@ test('shop tenancy, hold limits, the counter queue and an in-place upgrade work 
   assert.ok((await call('GET /items')).body.find(({ id: itemId }) => itemId === 'item-02').photoUrl);
   assert.equal((await photo(null)).status, 200);
   assert.equal((await call('GET /items')).body.find(({ id: itemId }) => itemId === 'item-02').photoUrl, undefined);
+
+  // Phase 4: pickups counted for billing, and a Razorpay webhook through the real condition parser.
+  const thisMonth = new Date(clock).toISOString().slice(0, 7);
+  const listed = (await call('GET /admin/shops', { as: admin })).body.find(({ id: shopId }) => shopId === 'campus-shop');
+  assert.deepEqual(listed.usage, [{ month: thisMonth, collected: 2 }], 'the two pickups above');
+  const webhook = (status, createdAt, eventId = randomUUID()) => {
+    const raw = JSON.stringify({ event: `subscription.${status}`, created_at: createdAt,
+      payload: { subscription: { entity: { id: 'sub_1', plan_id: 'plan_1', status, notes: { shopId: 'campus-shop' } } } } });
+    return call('POST /billing/razorpay', { body: raw, headers: {
+      'x-razorpay-signature': createHmac('sha256', 'whsec_integration').update(raw).digest('hex'), 'x-razorpay-event-id': eventId } });
+  };
+  const nowSeconds = Math.floor(clock / 1000);
+  const halted = randomUUID();
+  assert.equal((await webhook('halted', nowSeconds, halted)).body.status, 'suspended');
+  assert.equal((await webhook('halted', nowSeconds, halted)).body.duplicate, true);
+  assert.equal((await webhook('active', nowSeconds - 60)).body.status, null, 'an older event does not undo a newer one');
+  assert.equal((await webhook('active', nowSeconds + 60)).body.status, 'active');
 
   assert.equal((await call('POST /admin/shops', { as: admin, body: { id: 'second-shop', name: 'Second shop', ownerId: randomUUID() } })).status, 201);
   assert.equal((await call('GET /shops/{shopId}/reservations', { as: owner, params: { shopId: 'second-shop' } })).status, 404);

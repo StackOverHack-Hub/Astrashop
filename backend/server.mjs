@@ -6,6 +6,7 @@ import { tokenVerifier } from './src/container-auth.mjs';
 import { makeHandler } from './src/app.mjs';
 import { backfillListingWords, makeMarketplace } from './src/marketplace.mjs';
 import { diskPhotos, s3Photos } from './src/photo-store.mjs';
+import { emfMetrics } from './src/metrics.mjs';
 import { dynamoMarketplace } from './src/marketplace-store.mjs';
 import { redisLimiter } from './src/marketplace-limit.mjs';
 import { containerConfig } from './src/container-config.mjs';
@@ -45,6 +46,7 @@ export async function startContainer(env = process.env) {
   const shopHandler = makeHandler(db, {
     itemsTable: config.tables.items, reservationsTable: config.tables.reservations, tenancyTable: config.tables.tenancy,
     shopKey: config.shopKey, defaultShopId: config.defaultShopId, holdMinutes: config.holdMinutes, photos,
+    razorpaySecret: config.razorpaySecret, emit: emfMetrics(),
   });
   const shop = async (event) => {
     if (event.source === 'aws.events') return shopHandler(event);

@@ -68,6 +68,12 @@ Many shops run on one deployment. Everyone signs in with the campus Cognito acco
   - Owners add a photo from the catalog. The browser shrinks it to 1200 px on its long side, as a JPEG of about 100-250 KB, before uploading.
   - The API keeps only real JPEG, PNG or WebP files of up to 600 KB, checking the file's first bytes rather than trusting its name. Each file is named by its own content hash, so it can be cached for a year.
   - Storage is S3 behind CloudFront on AWS, a Docker volume locally, and memory in the lightweight preview.
+- **Billing.** Shops pay a monthly subscription through Razorpay.
+  - Create each subscription with the note `shopId` set to the shop's id, and point Razorpay's webhook at the `BillingWebhookUrl` output, with the same secret as `RazorpayWebhookSecret`.
+  - The subscription's status sets the shop's: `active` opens it, while `halted`, `cancelled`, `completed`, `paused` and `expired` suspend it. `pending` (Razorpay retrying a payment) leaves it open.
+  - Each event is recorded once in an append-only ledger. An older event arriving late never undoes a newer one, and a suspension set by a platform admin stays until an admin lifts it.
+  - Pickups are counted per shop per month for a per-pickup fee, and platform admins see the last three months on the Shops screen, along with each shop's plan.
+- **Suspended shops** take no new reservations and drop out of the shop list, and their owners can't change the catalog, photos, staff or shop details. The counter still finishes pickups already made.
 - **Marketplace search** matches any word of a title, or the start of one: "sheet" finds "A2 drawing sheet". When several words are typed, every one must match.
 - **The pilot shop.** Data from before shops existed belongs to the default shop (`DefaultShopId`). The `/shop/*` routes and the shared counter key still open that one shop's counter until its staff sign in with accounts. Unset the key to switch it off.
 
@@ -94,7 +100,8 @@ Signed-in routes take the campus access token as `Authorization: Bearer …`. Th
 | PUT | `/shops/{shopId}` | owner | `{ name, pickupWindow }` |
 | GET | `/shops/{shopId}/audit` | owner | Activity, newest first, 50 per page with `?cursor=` |
 | GET, POST | `/admin/shops` | platform admin | List shops, or open one `{ id, name, pickupWindow?, ownerId? }` |
-| PUT | `/admin/shops/{shopId}` | platform admin | `{ status: "trial" \| "active" \| "suspended" }` |
+| PUT | `/admin/shops/{shopId}` | platform admin | `{ status?, plan? }`. A status set here is the admin's, and billing never lifts an admin suspension. |
+| POST | `/billing/razorpay` | Razorpay | Subscription webhooks, checked against `X-Razorpay-Signature` (HMAC-SHA256 of the body); `501` when no secret is set |
 | GET, PUT, POST | `/shops/{shopId}/reservations`, `/stats`, `/items/{id}`, `/reservations/{id}/…` | staff | The counter routes below, for that shop. Recounts send `{ stock, expectedVersion }`. Stats cover the last 90 days, or `?days=`. |
 
 The pilot routes below act on the default shop. `/items` is public, `POST /reservations` needs a signed-in student, and the `/shop/*` routes need the header `x-shop-key`.
@@ -265,7 +272,16 @@ To change the backend later, run `sam deploy` again from `backend/`. To change t
 
 ## Running it in production
 
-- **Logs:** CloudWatch log groups for the Lambda (JSON, with request IDs) and for API access logs (route, status, latency, caller IP). Both are kept for 30 days. Rejected shop keys are logged as `shop_key_rejected`, and each expiry run as `holds_expired`.
+- **Logs:**
+  - CloudWatch log groups for the Lambda (JSON, with request IDs) and for API access logs (route, status, latency, caller IP), both kept for 30 days.
+  - Rejected shop keys are logged as `shop_key_rejected`, each expiry run as `holds_expired`, and billing problems as `billing_signature_rejected`, `billing_unmatched` and `billing_status_skipped`.
+  - The container logs one `request` line per API call (route pattern, status, milliseconds).
+- **Metrics** (namespace `Astrashop`, in total and per shop): `ReservationCreated`, `HoldLimitHit`, `Collected`, `Expired`, and `SweepRun`. They are written as CloudWatch embedded-metric log lines, straight to stdout so Lambda's JSON log format leaves them as they are. A container needs the CloudWatch agent or FireLens for the same. **First check after deploying:** confirm `Astrashop/SweepRun` appears in CloudWatch metrics within 20 minutes. If it doesn't, the lines aren't being turned into metrics, and `SweepHeartbeatAlarm` will go red about 30 minutes after the deploy.
+- **More alarms:**
+  - `SweepHeartbeatAlarm`: the expiry job hasn't run for 30 minutes, so holds have stopped expiring.
+  - `HoldCountMismatchAlarm`: hold counts disagree with holds.
+  - `BillingSignatureAlarm`: repeated bad webhook signatures, meaning a forged webhook or a secret changed on only one side.
+  - On the marketplace stack, `LimiterUnavailableAlarm`: Redis is down and writes are refused.
 - **Alarms:** `Api5xxAlarm` fires on 5 or more server errors in 5 minutes. `FunctionErrorsAlarm` fires on any Lambda crash or timeout, and also when the expiry job can't expire a hold (logged as `hold_expiry_failed` with the reservation and item ids). They email `AlertEmail` if you set one. After the first deploy, open CloudWatch → Metrics → ApiGateway, check that `5xx` appears under this API's ApiId and Stage, and that `Api5xxAlarm`'s graph shows that line. The alarm treats missing data as OK, so a mismatched metric would stay silent.
 - **Limits:**
   - The API is throttled to bursts of 400 and 200 requests per second, sized for about 50 shops at the start of term. API Gateway treats these as targets, not exact caps.
@@ -293,7 +309,8 @@ The three tables are kept on purpose, so a mistaken delete can't wipe reservatio
 ## What's left out on purpose
 - **Not in scope:** online payments, delivery, and more than one campus. Marketplace includes private messages for buyer and seller handover.
 - **Shop Lambda limits:** the shop Lambda has no Redis, so it relies on API Gateway throttles and the per-student hold limit. Marketplace and the combined container also use Redis for application limits.
-- **Still to come:** billing, metrics and alarms per shop, and merging the two stacks.
+- **Two stacks on purpose:** the shop and marketplace stay separate stacks that share one Cognito pool. Merging them would mean moving live Cognito users and retained tables between stacks, a risky one-way migration that adds nothing students or shops would notice.
+- **Not built:** online payment at reservation time, course kits, and trial expiry (platform admins move shops off trial by hand or through billing).
 - **Hash links, not paths:** links stay `#…` (for example `#item/campus-shop/item-02`). They are already shareable, and path links would need server rewrites for little gain without server rendering. See the phases in [DESIGN.md](docs/production/DESIGN.md#11-phases).
 
 ## License

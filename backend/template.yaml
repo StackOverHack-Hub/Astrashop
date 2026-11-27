@@ -19,6 +19,11 @@ Parameters:
     Type: String
     AllowedPattern: '^[0-9a-z]+$'
     Description: The StudentClient id from the marketplace stack.
+  RazorpayWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional webhook secret from the Razorpay dashboard. Empty turns POST /billing/razorpay off (501).
   DefaultShopId:
     Type: String
     Default: campus-shop
@@ -225,6 +230,7 @@ Resources:
           SHOP_KEY: !Ref ShopKey
           DEFAULT_SHOP_ID: !Ref DefaultShopId
           HOLD_MINUTES: !Ref HoldMinutes
+          RAZORPAY_WEBHOOK_SECRET: !Ref RazorpayWebhookSecret
           PHOTO_BUCKET: !Ref PhotoBucket
           PHOTO_BASE_URL: !Sub 'https://${PhotoCdn.DomainName}'
       # Only the actions the code uses; transactions authorize as their parts.
@@ -246,6 +252,8 @@ Resources:
         ListItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /items, Method: GET, Auth: { Authorizer: NONE } } }
         ShopItems: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/shops/{shopId}/items', Method: GET, Auth: { Authorizer: NONE } } }
         Shops: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /shops, Method: GET, Auth: { Authorizer: NONE } } }
+        # Signed by Razorpay with the webhook secret; checked inside the function.
+        Billing: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /billing/razorpay, Method: POST, Auth: { Authorizer: NONE } } }
         GetReservation: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: '/reservations/{id}', Method: GET, Auth: { Authorizer: NONE } } }
         # Signed in; the function checks the shop role for each request.
         Me: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: /me, Method: GET } }
@@ -321,7 +329,70 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
 
+  # The expiry sweep publishes SweepRun every 10 minutes. No runs for 30 minutes means holds stop
+  # expiring and stock stays locked up, even though nothing is "erroring".
+  SweepHeartbeatAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The hold expiry sweep has not run for 30 minutes
+      Namespace: Astrashop
+      MetricName: SweepRun
+      Statistic: Sum
+      Period: 600
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
+
+  # A pickup finished without a hold count to give back: counts and holds disagree (after a restore?).
+  HoldCountMismatchFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FunctionLogs
+      FilterPattern: '"hold_count_mismatch"'
+      MetricTransformations: [{ MetricNamespace: Astrashop, MetricName: HoldCountMismatch, MetricValue: '1', DefaultValue: 0 }]
+
+  HoldCountMismatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Hold counts disagree with holds; check the tenancy table against reservations
+      Namespace: Astrashop
+      MetricName: HoldCountMismatch
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
+
+  # Someone is posting forged billing webhooks, or the Razorpay secret was rotated on one side only.
+  BillingSignatureFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FunctionLogs
+      FilterPattern: '"billing_signature_rejected"'
+      MetricTransformations: [{ MetricNamespace: Astrashop, MetricName: BillingSignatureRejected, MetricValue: '1', DefaultValue: 0 }]
+
+  BillingSignatureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Billing webhooks with a bad signature; check the Razorpay webhook secret on both sides
+      Namespace: Astrashop
+      MetricName: BillingSignatureRejected
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertEmail, [!Ref AlertTopic], !Ref AWS::NoValue]
+
 Outputs:
+  BillingWebhookUrl:
+    Description: Paste into Razorpay as the webhook URL, with the same secret as RazorpayWebhookSecret.
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com/billing/razorpay
   ApiUrl:
     Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com
   ItemsTableName:
