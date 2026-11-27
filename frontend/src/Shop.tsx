@@ -193,9 +193,9 @@ export function Shop({ catalog }: { catalog: Catalog }) {
 
   return (
     <>
-      <div className="counter-head">
+      <div className="page-header page-header-split">
         <div>
-          <h1>Shop counter</h1>
+          <h1 className="page-title">Shop counter</h1>
           <p className="hint">Set reserved units aside, hand them over against the code, and keep the shelf count honest.</p>
         </div>
         {unlocked && (
@@ -210,13 +210,13 @@ export function Shop({ catalog }: { catalog: Catalog }) {
       {error && <p className="notice error" role="alert">{error}</p>}
       {notice && <p className="notice success" role="status">{notice}</p>}
       {!unlocked ? (
-        <form className="key-form" onSubmit={(event) => {
+        <form className="key-form panel" onSubmit={(event) => {
           event.preventDefault();
           void loadHolds(entry);
         }}>
           <label htmlFor="shop-key">Counter key</label>
           <p className="hint">The key the shop was given when Astrashop was set up.</p>
-          <input id="shop-key" type="password" value={entry} required autoComplete="off"
+          <input id="shop-key" className="field-control" type="password" value={entry} required autoComplete="off"
             onChange={(event) => setEntry(event.target.value)} />
           <button className="reserve" disabled={loading || !entry.trim()}>{loading ? 'Checking key…' : 'Open the counter'}</button>
         </form>
@@ -232,7 +232,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
               <div className="code-check">
                 <label htmlFor="code-check">Check a pickup code</label>
                 <div className="code-entry">
-                  <input id="code-check" ref={codeInput} inputMode="numeric" autoComplete="off" placeholder="123 456"
+                  <input id="code-check" className="field-control" ref={codeInput} inputMode="numeric" autoComplete="off" placeholder="123 456"
                     value={groupCode(codeQuery)} onChange={(event) => setCodeQuery(event.target.value.replace(/\D/g, '').slice(0, 6))} />
                   {codeQuery && <button type="button" className="text-button" onClick={() => {
                     setCodeQuery('');
@@ -302,7 +302,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
               </ul>
             </section>
 
-            <section className="sheet ledger" aria-labelledby="stock-heading">
+            <section className="sheet sheet-ruled ledger" aria-labelledby="stock-heading">
               <div className="sheet-head">
                 <h2 id="stock-heading">Shelf count</h2>
                 <p className="hint">Count only units available to sell. Leave out every active reservation, even if its unit is still on the shelf.</p>
@@ -314,7 +314,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
                 <form className="ledger-row" key={item.id} onSubmit={(event) => void saveStock(event, item)}>
                   <label className="ledger-item" htmlFor={`stock-${item.id}`}>{item.name}<span className="visually-hidden">, units on the shelf</span></label>
                   <p className="ledger-meta">Counted <time dateTime={item.confirmedAt}>{age(item.confirmedAt)}</time></p>
-                  <input id={`stock-${item.id}`} type="number" inputMode="numeric" min="0" step="1" required disabled={!!saving}
+                  <input id={`stock-${item.id}`} className="field-control" type="number" inputMode="numeric" min="0" step="1" required disabled={!!saving}
                     value={drafts[item.id] ?? item.stock} onChange={(event) => {
                       const value = event.target.value;
                       draftBase.current[item.id] ??= item.stock;
@@ -326,7 +326,7 @@ export function Shop({ catalog }: { catalog: Catalog }) {
             </section>
           </div>
 
-          <section className="panel stats" aria-labelledby="stats-heading">
+          <section className="panel panel-tinted stats" aria-labelledby="stats-heading">
             <div className="panel-head">
               <h2 id="stats-heading">Pilot numbers</h2>
               <p className="hint">

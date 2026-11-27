@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, getReservation, reserveItem, type Item, type Reservation } from './api';
-import { age, amount, availability, groupCode, until } from './format';
+import { age, availability, groupCode, until } from './format';
+import { Rupees } from './Rupees';
 import type { Catalog } from './main';
 
 type Attempt = {
@@ -145,11 +146,11 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
 
   return (
     <>
-      <div className="find">
-        <h1><label htmlFor="item-search">What do you need for class?</label></h1>
-        <input id="item-search" type="search" placeholder="Lab record book, drafter, graph paper" autoComplete="off"
+      <div className="find page-header">
+        <h1 className="page-title"><label htmlFor="item-search">What do you need for class?</label></h1>
+        <input id="item-search" className="search-control" type="search" placeholder="Lab record book, drafter, graph paper" autoComplete="off"
           value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="courses" role="group" aria-label="Filter by course">
+        <div className="courses text-tabs" role="group" aria-label="Filter by course">
           <button type="button" aria-pressed={!course} onClick={() => setCourse(undefined)}>all</button>
           {courses.map((name) => (
             <button type="button" key={name} aria-pressed={course === name} onClick={() => setCourse(name)}>
@@ -165,7 +166,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
       {reserveError && <p className="notice error" role="alert">{reserveError}</p>}
 
       <div className={filtering ? 'student-layout is-filtering' : 'student-layout'}>
-        <section className="sheet" aria-label="Campus shop items">
+        <section className="sheet sheet-ruled" aria-label="Campus shop items">
           <div className="sheet-head">
             <div className="sheet-title">
               <h2>Campus stationery shop</h2>
@@ -199,7 +200,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
                 <li className="entry" key={item.id}>
                   {item.course && <p className="entry-course">{item.course}</p>}
                   <h2 className="entry-name">{item.name}</h2>
-                  <p className="entry-price"><span className="rupee">₹</span>{amount(item.price)}</p>
+                  <p className="entry-price price"><Rupees value={item.price} /></p>
                   {(item.stock > 0 || pending) && (
                     <button type="button" className="reserve" disabled={!!reserving} onClick={() => void reserve(item)}>
                       {reserving === item.id ? 'Reserving…' : pending ? 'Retry' : held ? 'Reserve another' : 'Reserve'}
@@ -216,7 +217,7 @@ export function Student({ catalog, active }: { catalog: Catalog; active: boolean
           </ul>
         </section>
 
-        <aside className="passes" aria-labelledby="passes-heading">
+        <aside className="panel panel-tinted passes" aria-labelledby="passes-heading">
           <div className="passes-head">
             <div>
               <h2 id="passes-heading">Your pickup passes</h2>

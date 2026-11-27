@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { getItems, type Item } from './api';
 import { Shop } from './Shop';
 import { Student } from './Student';
+import { Marketplace } from './Marketplace';
+import { isLoginCallback, marketplaceEnabled } from './marketplace-api';
 import '@fontsource-variable/bricolage-grotesque/opsz.css';
 import './styles.css';
 
@@ -13,15 +15,20 @@ export type Catalog = {
   refresh: () => Promise<void>;
 };
 
+function currentScreen() {
+  if (marketplaceEnabled && (/^#marketplace(\/|$)/.test(window.location.hash) || isLoginCallback())) return 'marketplace';
+  return window.location.hash === '#shop' ? 'shop' : 'student';
+}
+
 function App() {
-  const [shop, setShop] = useState(() => window.location.hash === '#shop');
+  const [screen, setScreen] = useState(currentScreen);
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const latestRequest = useRef(0);
 
   useEffect(() => {
-    const syncScreen = () => setShop(window.location.hash === '#shop');
+    const syncScreen = () => setScreen(currentScreen());
     window.addEventListener('hashchange', syncScreen);
     return () => window.removeEventListener('hashchange', syncScreen);
   }, []);
@@ -61,13 +68,15 @@ function App() {
           astrashop
         </a>
         <nav aria-label="Main navigation" className="navigation">
-          <a href="#" aria-current={!shop ? 'page' : undefined}>Find supplies</a>
-          <a href="#shop" aria-current={shop ? 'page' : undefined}>Shop counter</a>
+          <a href="#" aria-current={screen === 'student' ? 'page' : undefined}>Find supplies</a>
+          {marketplaceEnabled && <a href="#marketplace" aria-current={screen === 'marketplace' ? 'page' : undefined}>Marketplace</a>}
+          <a href="#shop" aria-current={screen === 'shop' ? 'page' : undefined}>Shop counter</a>
         </nav>
       </header>
       <main id="main" tabIndex={-1} className="shell content">
-        <div hidden={shop}><Student catalog={catalog} active={!shop} /></div>
-        {shop && <Shop catalog={catalog} />}
+        <div hidden={screen !== 'student'}><Student catalog={catalog} active={screen === 'student'} /></div>
+        {screen === 'shop' && <Shop catalog={catalog} />}
+        {screen === 'marketplace' && <Marketplace />}
       </main>
     </>
   );

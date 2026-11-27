@@ -1,5 +1,6 @@
 # Paste into Amplify console → Hosting → Custom headers, after replacing API_ORIGIN
 # with your ApiUrl from `sam deploy`, e.g. https://abc123.execute-api.ap-south-1.amazonaws.com
+# If Marketplace is enabled, add its API URL and Cognito login origin to connect-src.
 customHeaders:
   - pattern: '**'
     headers:
