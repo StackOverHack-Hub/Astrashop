@@ -3,6 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+for tool in aws sam node npm jq curl python3; do
+  command -v "$tool" > /dev/null || { printf 'Missing deployment tool: %s\n' "$tool" >&2; exit 1; }
+done
+node --eval 'if (process.versions.node.split(".")[0] !== "22") { console.error("Use Node.js 22 for the Lambda build."); process.exit(1); }'
+
 export AWS_DEFAULT_REGION="${ASTRASHOP_REGION:-ap-south-1}"
 export AWS_PAGER=''
 export SAM_CLI_TELEMETRY=0

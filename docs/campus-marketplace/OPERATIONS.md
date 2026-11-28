@@ -29,6 +29,8 @@ Use the same region as the shop. Confirm that your account supports ElastiCache 
 
 For a new deployment, run `bash scripts/deploy-aws.sh` from the repository in AWS CloudShell. It uses Mumbai (`ap-south-1`) by default. Set `ASTRASHOP_REGION` to choose another region. The script deploys both stacks, adds the labeled sample catalog, builds the frontend, sets the security headers, and starts an Amplify deployment. It saves public deployment settings in `artifacts/aws-deployment.json`. Check that the Amplify job succeeds, then test the live site and campus sign-in. Use the three-step migration in the README for an existing single-shop stack.
 
+The build requires Node.js 22. If CloudShell has an older version, install a temporary copy with `npm install --prefix /tmp/astrashop-tools node@22`, then run `export PATH="/tmp/astrashop-tools/node_modules/node/bin:$PATH"`. Use a region that your AWS organization permits.
+
 Choose these deployment values:
 
 - `FrontendOrigin` is the canonical HTTPS AstraShop URL. Remove its trailing slash.
