@@ -15,6 +15,11 @@ Parameters:
     Type: String
     AllowedPattern: '^[a-z][a-z0-9-]{2,23}$'
     Description: A unique short lowercase prefix for the Cognito domain and ElastiCache.
+  CacheEngine:
+    Type: String
+    Default: redis
+    AllowedValues: [redis, valkey]
+    Description: Use valkey for a new pilot to reduce the minimum cache storage charge. Keep redis for existing deployments.
   ThrottleRate:
     Type: Number
     Default: 35
@@ -25,6 +30,9 @@ Parameters:
     Default: 70
     MinValue: 10
     MaxValue: 400
+
+Conditions:
+  UsesValkey: !Equals [!Ref CacheEngine, valkey]
 
 Resources:
   MarketplaceTable:
@@ -113,7 +121,7 @@ Resources:
   RedisUser:
     Type: AWS::ElastiCache::User
     Properties:
-      Engine: redis
+      Engine: !Ref CacheEngine
       UserId: !Sub '${ResourcePrefix}-limiter'
       UserName: default
       AccessString: 'on ~astrashop:marketplace:* +@connection +cluster|slots +cluster|shards +asking +eval +time +hmget +hset +pexpire'
@@ -123,14 +131,14 @@ Resources:
   RedisUsers:
     Type: AWS::ElastiCache::UserGroup
     Properties:
-      Engine: redis
+      Engine: !Ref CacheEngine
       UserGroupId: !Sub '${ResourcePrefix}-limiters'
       UserIds: [!Ref RedisUser]
   Redis:
     Type: AWS::ElastiCache::ServerlessCache
     Properties:
-      Engine: redis
-      MajorEngineVersion: '7'
+      Engine: !Ref CacheEngine
+      MajorEngineVersion: !If [UsesValkey, '8', '7']
       ServerlessCacheName: !Sub '${ResourcePrefix}-limits'
       SubnetIds: [!Ref PrivateA, !Ref PrivateB]
       SecurityGroupIds: [!Ref CacheNetwork]

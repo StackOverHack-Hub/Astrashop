@@ -25,7 +25,9 @@ Listing drafts use this tab's session storage and are separated by account and l
 
 ## AWS setup
 
-Use the same region as the shop. Confirm that your account supports ElastiCache Serverless Redis OSS and check its storage and compute charges. The marketplace uses a separate stack and private VPC. Its DynamoDB table is retained on stack deletion. [ElastiCache pricing](https://aws.amazon.com/elasticache/pricing/)
+Use the same region as the shop. Confirm that your account supports ElastiCache Serverless and check its storage and compute charges. For a new pilot, set `CacheEngine=valkey` to use the lower minimum storage charge with the same Redis protocol. Existing deployments default to `redis`. The marketplace uses a separate stack and private VPC. Its DynamoDB table is retained on stack deletion. [ElastiCache pricing](https://aws.amazon.com/elasticache/pricing/)
+
+For a new deployment, run `bash scripts/deploy-aws.sh` from the repository in AWS CloudShell. It uses Mumbai (`ap-south-1`) by default. Set `ASTRASHOP_REGION` to choose another region. The script deploys both stacks, adds the labeled sample catalog, builds the frontend, sets the security headers, and starts an Amplify deployment. It saves public deployment settings in `artifacts/aws-deployment.json`. Check that the Amplify job succeeds, then test the live site and campus sign-in. Use the three-step migration in the README for an existing single-shop stack.
 
 Choose these deployment values:
 
