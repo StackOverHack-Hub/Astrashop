@@ -9,6 +9,7 @@ done
 node --eval 'if (process.versions.node.split(".")[0] !== "22") { console.error("Use Node.js 22 for the Lambda build."); process.exit(1); }'
 
 export AWS_DEFAULT_REGION="${ASTRASHOP_REGION:-ap-south-1}"
+export AWS_REGION="$AWS_DEFAULT_REGION"
 export AWS_PAGER=''
 export SAM_CLI_TELEMETRY=0
 region="$AWS_DEFAULT_REGION"

@@ -1,38 +1,50 @@
 # Astrashop AWS build summary
 
-**Deployment.** [LIVE PROTOTYPE URL] in [AWS REGION], using [RELEASE COMMIT]. Fill in these details from the deployed build before submission.
+**Deployment.** [Live Astrashop pilot](https://main.d122punxfnd0ue.amplifyapp.com/) in `ap-southeast-2` (Sydney), using release `181c9ad5eb9cce7c5fa9edb4e4974d294f4929e1`. The catalog contains labeled sample stock. See the [deployment record](../production/DEPLOYMENT.md) for verified checks and remaining account tests.
 
 ```mermaid
 flowchart TD
     Browser[Student or shop browser] -->|Load web app| Hosting[Amplify Hosting]
-    Browser -->|HTTPS JSON| Api[API Gateway HTTP API]
-    Api -->|Invoke route handler| Lambda["Node.js Lambda"]
-    Lambda -->|Read or update inventory| Items[DynamoDB items]
-    Lambda -->|Create or update holds| Holds[DynamoDB reservations]
-    Schedule[EventBridge every 10 min] -->|Expire overdue holds| Lambda
-    Lambda -.->|JSON logs, alarms| Watch[CloudWatch + SNS]
+    Browser -->|Campus sign-in| Cognito[Cognito]
+    Browser -->|HTTPS JSON and access token| Api[Shop and marketplace HTTP APIs]
+    Api --> Shop[Shop Lambda]
+    Api --> Market[Marketplace Lambda]
+    Shop --> Items[DynamoDB items, reservations and tenancy]
+    Market --> Offers[DynamoDB marketplace]
+    Market --> Limits[Private ElastiCache Valkey limiter]
+    Shop --> Photos[Private S3 photos]
+    Browser --> CDN[CloudFront photos]
+    CDN --> Photos
+    Schedule[EventBridge every 10 min] -->|Expire overdue holds| Shop
+    Shop -.-> Watch[CloudWatch logs, metrics and alarms]
+    Market -.-> Watch
 ```
 
 ## Request flow
 
-1. The browser loads the static React app from Amplify Hosting. The Vite build uses `VITE_API_URL` to locate the HTTP API. `GET /items` reads the catalog, stock counts, latest confirmation times, and pickup windows.
-2. For a hold, the browser generates a reservation UUID and sends it with the item ID. Lambda issues one DynamoDB transaction. It subtracts one unit only if stock is at least one and creates a `HELD` reservation only if the ID is unused. Both writes commit together. A retry sends the same UUID, so it cannot deduct another unit through the same reservation ID.
-3. The browser checks status by reservation ID. The shop counter sends its key in `x-shop-key` to list holds, confirm a stock count, or collect or release a hold. API Gateway handles browser CORS. Lambda checks the key and allows collect and release only from `HELD`. Release returns one unit in the same transaction that closes the hold. A stock recount carries the count the shopkeeper started from and is rejected if a reservation or release changed stock in the meantime, so a unit already set aside is never offered again. Transient DynamoDB conflicts and throttling return `503`, which the app retries with the same reservation ID.
-4. Every hold carries an `expiresAt`. Every 10 minutes EventBridge invokes the same Lambda, which marks overdue holds `EXPIRED` and returns each unit in one transaction, so unclaimed stock goes back on the shelf. The shop screen lists those holds as "put back on shelf" until the shopkeeper confirms, so the physical unit rejoins the shelf before the next count. A hold that can't expire is logged with its ids and trips the Lambda error alarm.
+1. The browser loads the static React app from Amplify. The public shop API reads the catalog, stock counts, confirmation times, and pickup windows from DynamoDB. The pilot has 12 labeled sample items.
+2. Students sign in through Cognito before reserving. Self-signup accepts the `adypu.edu.in` email domain. For each hold, the browser sends a UUID and item ID. One DynamoDB transaction reduces stock, creates the hold, and enforces the limit of three active holds per student per shop. A retry with the same UUID returns the existing hold.
+3. Staff sign in through the same pool. The shop Lambda checks their shop role before it changes inventory or pickups. A stock recount includes the expected version, so a concurrent reservation causes the recount to fail safely. Collect, release, and expiry close a hold once. Staff actions create audit records. The legacy shared counter key is disabled on this deployment.
+4. EventBridge runs hold expiry every 10 minutes. The shop Lambda marks overdue holds `EXPIRED` and returns stock in a transaction. The counter lists physical returns until staff confirm that each item is back on the shelf.
+5. The marketplace Lambda serves student listings, profiles, saved offers, messages, reviews, and moderation routes. DynamoDB stores the records. A private Valkey cache applies per-user and per-network request limits. Failed limiter checks refuse writes. The initial marketplace has no listings.
 
 ## What each service does
 
 | AWS service | Feature and data | Why it fits | Cost, security, or reliability |
 | --- | --- | --- | --- |
-| **Amplify Hosting** | Serves the compiled HTML, JavaScript, and CSS. | Publishes a mobile web app over HTTPS from a static build. | Only the API URL is public frontend configuration. Keep the served build available through Demo Day and check hosting usage in AWS Billing. |
-| **API Gateway HTTP API** | Receives catalog, reservation, and shop requests and passes them to Lambda. | Gives the browser a single HTTPS API endpoint with method and path routing. | CORS is locked to the frontend origin (`AllowedOrigin`). Stage throttling (burst 50, 25 requests/s) caps cost and abuse. JSON access logs record route, status, latency and caller IP for 30 days. |
-| **AWS Lambda** | Handles JSON validation, stock updates, and reservation state changes. | One handler is enough for the small set of MVP routes without running a server continuously. | The shop key is a `NoEcho` parameter, compared in constant time and never logged. The role allows only GetItem, PutItem, UpdateItem and Scan on the two tables. JSON logs with request IDs, kept 30 days. |
-| **Amazon EventBridge** | Scheduled rule that runs hold expiry every 10 minutes. | Serverless cron with no extra code to host. | Each run is idempotent: a hold already collected or released is skipped, so a run can never restock twice. |
-| **Amazon CloudWatch + SNS** | Log groups, an API 5xx alarm and a Lambda error alarm, optional email. | Built-in metrics for API Gateway and Lambda, no agent. | Alarms cover both caught failures (5xx responses) and crashes or timeouts, including the expiry job. |
-| **Amazon DynamoDB** | Stores item details, shelf stock and confirmation timestamps, and UUID-keyed holds with codes and status. | Conditional transactions protect the subtract-and-create and release-and-restock operations. | On-demand capacity. Point-in-time recovery (35 days) and `Retain` deletion policy protect the data. Conflicts return `503`, not "sold out". |
+| **Amplify Hosting** | Serves the compiled frontend over HTTPS. | No application server is needed for static files. | CSP, HSTS, `nosniff`, and frame restrictions are configured. Public settings contain API origins and Cognito client details. |
+| **API Gateway HTTP APIs** | Route shop and marketplace requests to their Lambda functions. | Provides HTTPS endpoints and Cognito token checks. | CORS allows only the live frontend. Shop throttles target 200 requests/s with a burst of 400. Marketplace throttles target 35 requests/s with a burst of 70. These are best-effort limits. |
+| **AWS Lambda** | Runs shop, marketplace, and signup validation code on Node.js 22. | Handles requests without a continuously running app server. | Execution roles restrict data access to the required tables, indexes, and photo prefix. Logs are retained for 30 days. |
+| **Amazon DynamoDB** | Stores all application records in four tables. | Conditional transactions protect inventory, hold limits, and state changes. | On-demand capacity, point-in-time recovery, and retained tables protect the data. |
+| **Amazon Cognito** | Provides campus accounts and role groups. | Both APIs use the same user pool. | OAuth authorization code flow uses PKCE. Shop roles are checked against current tenancy records. |
+| **ElastiCache and Secrets Manager** | Run the private Valkey limiter and store its password. | Reuses the Redis token-bucket implementation. | TLS, private subnets, and a restricted cache user protect access. Valkey reduces the minimum storage charge. |
+| **S3 and CloudFront** | Store and serve item photos. | Keeps image storage separate from the API. | S3 is private. CloudFront uses origin access control. The API validates image contents and size. |
+| **EventBridge and CloudWatch** | Schedule expiry and record logs, metrics, and alarms. | Provides operations support without a separate worker server. | Alarms cover server errors, expiry heartbeat, hold-count mismatches, billing signatures, and limiter failures. Email alerts are not configured. |
 
 ## Deployment and verification
 
-The AWS SAM template provisions the API, Lambda, execution role, tables, schedule, log groups and alarms. CI runs the backend tests, the frontend build and `cfn-lint` on every pull request. Build the frontend against the API output URL and deploy the static build to Amplify Hosting. If seeding sample items, keep the **Sample data** label visible. Record the budget alert, Free Tier eligibility for the deployed resources, and the test date in [DEPLOYMENT NOTES].
+Two SAM stacks provision the backend and share the Cognito pool. The deployment script builds and uploads the frontend to Amplify. Both stacks reached `CREATE_COMPLETE`, and Amplify job `1` succeeded on 28 November 2026. The AWS account permits Sydney and refused the attempted Mumbai region.
 
-Record actual results for [SIGNED-OUT HTTPS TEST], [LAST-UNIT AND SAME-ID RETRY TEST], [SHOP PREFLIGHT AND KEY TEST], and [COLLECT AND RELEASE TEST]. Update the service list and request flow to match the release commit before handoff.
+The backend passed 89 tests, with three local-service tests skipped. All eight client tests and both production frontend builds passed. Both SAM templates passed lint validation. Ten live checks passed for public reads, private-route rejection, CORS, and frontend security headers. A browser loaded the catalog, item page, marketplace, and Cognito sign-in. A manual expiry sweep returned successfully.
+
+The expiry heartbeat also appeared in CloudWatch. The initial platform administrator account was created and invited by email. Its first sign-in and password setup are pending. An authenticated reservation and staff workflow still need a real campus account. No shop owner has been assigned. Phone photo upload and Razorpay events remain unverified. The billing webhook is disabled until a secret is configured. AWS credits cover eligible usage while available; inspect actual service costs in AWS Billing. The linked email listed 27 November 2026 as the challenge deadline, before this deployment.

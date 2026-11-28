@@ -2,6 +2,8 @@
 
 Reserve the exact course item you need at your campus shop, and pick it up before your deadline.
 
+**Live AWS pilot:** [Open Astrashop](https://main.d122punxfnd0ue.amplifyapp.com/). The catalog contains labeled sample stock. All application records are stored in Amazon DynamoDB in Sydney (`ap-southeast-2`). See the [deployment record](docs/production/DEPLOYMENT.md) for the release, services, and verified checks.
+
 A student searches the shop's items, checks availability and hours, and reserves a unit with a six-digit pickup code. The shopkeeper confirms when the unit is set aside. The student can refresh their pickup pass to check whether it’s ready. At the counter, the shopkeeper checks the code and marks the unit collected. The student pays in person.
 
 The shop counter has separate sections for pickups, shelf counts, and pilot numbers. The dashboard tracks reservation outcomes and the time from reservation to set-aside or collection. Use the [pilot measurement sheet](docs/pilot/measurement.md) to record the student’s start time, their deadline, and baseline attempts.
